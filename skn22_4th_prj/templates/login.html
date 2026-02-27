@@ -21,17 +21,15 @@
       <form action="/auth/login/" method="post" class="space-y-4">
         {% csrf_token %}
         <div>
-          <label
-            class="block text-gray-700 text-sm font-bold mb-2"
-            for="username"
-            >아이디</label
+          <label class="block text-gray-700 text-sm font-bold mb-2" for="email"
+            >이메일</label
           >
           <input
             class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-            id="username"
-            name="username"
-            type="text"
-            placeholder="아이디"
+            id="email"
+            name="email"
+            type="email"
+            placeholder="example@email.com"
             required
           />
         </div>

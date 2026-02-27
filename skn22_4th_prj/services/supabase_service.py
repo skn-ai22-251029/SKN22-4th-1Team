@@ -27,29 +27,60 @@ class SupabaseService:
         return cls._client
 
     @classmethod
-    async def auth_sign_up(cls, username, password):
-        """Supabase Auth를 이용한 회원가입"""
+    async def auth_sign_up(cls, email, password):
+        """Supabase Auth를 이용한 회원가입 (실제 이메일 사용)"""
         client = cls.get_client()
-        # 이메일 형식이 필요하므로 가상 도메인 추가
-        email = f"{username}@internal.com"
         try:
             response = client.auth.sign_up({"email": email, "password": password})
-            return response.user
+            return response.user, None
         except Exception as e:
-            logger.error(f"[Supabase Auth] Sign up error: {e}")
-            return None
+            error_msg = str(e)
+            logger.error(f"[Supabase Auth] Sign up error: {error_msg}")
+            if "already registered" in error_msg.lower():
+                return None, "exists"
+            return None, error_msg
 
     @classmethod
-    async def auth_sign_in(cls, username, password):
-        """Supabase Auth를 이용한 로그인"""
+    async def auth_sign_in(cls, email, password):
+        """Supabase Auth를 이용한 로그인 (실제 이메일 사용)"""
         client = cls.get_client()
-        email = f"{username}@internal.com"
         try:
             response = client.auth.sign_in_with_password({"email": email, "password": password})
             return response.user, response.session
         except Exception as e:
             logger.error(f"[Supabase Auth] Sign in error: {e}")
             return None, None
+
+    @classmethod
+    async def auth_update_password(cls, new_password):
+        """현재 로그인된 사용자의 비밀번호 변경"""
+        client = cls.get_client()
+        try:
+            response = client.auth.update_user({"password": new_password})
+            return response.user, None
+        except Exception as e:
+            logger.error(f"[Supabase Auth] Password update error: {e}")
+            return None, str(e)
+
+    @classmethod
+    async def auth_delete_user(cls, user_id: str):
+        """사용자 계정 삭제 (Auth 영역) - 매번 새 클라이언트로 실행"""
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
+        if not url or not key:
+            return False, "Supabase 설정이 없습니다."
+        try:
+            # 캐싱된 클라이언트 대신 새 클라이언트를 만들어 사용
+            # (이전 삭제 요청의 세션 상태가 남아있는 문제 방지)
+            fresh_client = create_client(url, key)
+            fresh_client.auth.admin.delete_user(str(user_id))
+            # 삭제 성공 후 기존 캐싱 클라이언트도 초기화
+            cls._client = None
+            return True, None
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"[Supabase Auth] Account delete error for {user_id}: {error_msg}")
+            return False, error_msg
 
     @classmethod
     async def get_dur_by_ingr(cls, ingr_text: str):
@@ -290,17 +321,18 @@ class SupabaseService:
         return None
 
     @classmethod
-    async def update_user_profile(cls, user_id: str, medications: str, allergies: str, diseases: str):
+    async def update_user_profile(cls, user_id: str, current_medications: str, allergies: str, chronic_diseases: str, is_pregnant: bool = False):
         """Supabase의 user_profile 테이블에 사용자 프로필 저장/업데이트 (UUID 지원)"""
         client = cls.get_client()
         if not client:
             return None
         try:
             payload = {
-                "user_id": user_id,
-                "current_medications": medications,
+                "user_id": str(user_id),
+                "current_medications": current_medications,
                 "allergies": allergies,
-                "chronic_diseases": diseases,
+                "chronic_diseases": chronic_diseases,
+                "is_pregnant": is_pregnant,
             }
             response = (
                 client.table("user_profile")
@@ -311,3 +343,16 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"[Supabase] Profile update error for user {user_id}: {e}")
             return None
+
+    @classmethod
+    async def delete_user_profile(cls, user_id: str):
+        """사용자 프로필 데이터 삭제"""
+        client = cls.get_client()
+        if not client:
+            return False
+        try:
+            client.table("user_profile").delete().eq("user_id", str(user_id)).execute()
+            return True
+        except Exception as e:
+            logger.error(f"[Supabase] Profile delete error for user {user_id}: {e}")
+            return False

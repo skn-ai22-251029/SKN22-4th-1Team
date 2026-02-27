@@ -461,13 +461,10 @@
         GDSI System
       </a>
       <div class="nav-links">
-        {% if user.is_authenticated %}
-        <span class="user-greeting">{{ user.username }}님 환영합니다</span>
+        {% if user %}
+        <span class="user-greeting">{{ user.display_name }}님 환영합니다</span>
         <a href="/user/profile" class="btn btn-secondary">내 정보 관리</a>
-        <form action="/auth/logout/" method="post" style="display: inline">
-          {% csrf_token %}
-          <button type="submit" class="btn btn-danger">로그아웃</button>
-        </form>
+        <a href="/auth/logout/" class="btn btn-danger">로그아웃</a>
         {% else %}
         <a href="/auth/login/" class="btn btn-secondary">로그인</a>
         <a href="/auth/register/" class="btn btn-primary">무료 회원가입</a>
