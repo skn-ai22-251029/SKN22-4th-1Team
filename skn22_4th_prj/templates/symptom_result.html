@@ -65,8 +65,8 @@
     <!-- 성분별 카드 목록 -->
     {% if ingredients_data %}
     <div class="space-y-5 mb-6">
-      {% for ing in ingredients_data|slice:":5" %}
-      <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+      {% for ing in ingredients_data %}
+      <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden {% if forloop.counter > 5 %}extra-ingredient hidden{% endif %}">
         <!-- 카드 헤더 -->
         <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <div class="flex items-center gap-3">
@@ -179,6 +179,14 @@
       </div>
       {% endfor %}
     </div>
+    {% if ingredients_data|length > 5 %}
+    <div class="text-center mb-6">
+      <button type="button" onclick="toggleAllIngredients(this)"
+        class="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-blue-200 bg-white text-blue-700 text-sm font-semibold hover:bg-blue-50 transition-colors">
+        전체 성분 보기 ({{ ingredients_data|length }}개)
+      </button>
+    </div>
+    {% endif %}
 
     <!-- 데이터 없을 때 폴백 -->
     {% elif answer %}
@@ -204,6 +212,16 @@
   </div>
 
   <script>
+    function toggleAllIngredients(button) {
+      const extras = document.querySelectorAll(".extra-ingredient");
+      if (!extras.length || !button) return;
+      const hasHidden = Array.from(extras).some((el) => el.classList.contains("hidden"));
+      extras.forEach((el) => el.classList.toggle("hidden", !hasHidden));
+      button.textContent = hasHidden
+        ? "성분 접기"
+        : `전체 성분 보기 (${extras.length + 5}개)`;
+    }
+
     function toggleAccordion(id) {
       const el = document.getElementById(id);
       const icon = document.getElementById(id + "-icon");

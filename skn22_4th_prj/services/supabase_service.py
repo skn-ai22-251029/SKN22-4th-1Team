@@ -1,9 +1,10 @@
 import os
 import re
-import asyncio
 import logging
 from supabase import create_client, Client
+
 from services.ai_service_v2 import AIService
+from services.ingredient_utils import canonicalize_ingredient_name
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,6 @@ class SupabaseService:
 
     @classmethod
     async def auth_sign_up(cls, email, password):
-        """Supabase Auth를 이용한 회원가입 (실제 이메일 사용)"""
         client = cls.get_client()
         try:
             response = client.auth.sign_up({"email": email, "password": password})
@@ -42,10 +42,11 @@ class SupabaseService:
 
     @classmethod
     async def auth_sign_in(cls, email, password):
-        """Supabase Auth를 이용한 로그인 (실제 이메일 사용)"""
         client = cls.get_client()
         try:
-            response = client.auth.sign_in_with_password({"email": email, "password": password})
+            response = client.auth.sign_in_with_password(
+                {"email": email, "password": password}
+            )
             return response.user, response.session
         except Exception as e:
             logger.error(f"[Supabase Auth] Sign in error: {e}")
@@ -53,7 +54,6 @@ class SupabaseService:
 
     @classmethod
     async def auth_update_password(cls, new_password):
-        """현재 로그인된 사용자의 비밀번호 변경"""
         client = cls.get_client()
         try:
             response = client.auth.update_user({"password": new_password})
@@ -64,17 +64,14 @@ class SupabaseService:
 
     @classmethod
     async def auth_delete_user(cls, user_id: str):
-        """사용자 계정 삭제 (Auth 영역) - 매번 새 클라이언트로 실행"""
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
         if not url or not key:
-            return False, "Supabase 설정이 없습니다."
+            return False, "Supabase credentials are not configured."
         try:
-            # 캐싱된 클라이언트 대신 새 클라이언트를 만들어 사용
-            # (이전 삭제 요청의 세션 상태가 남아있는 문제 방지)
+            # Use a fresh client to avoid stale auth state after admin operations.
             fresh_client = create_client(url, key)
             fresh_client.auth.admin.delete_user(str(user_id))
-            # 삭제 성공 후 기존 캐싱 클라이언트도 초기화
             cls._client = None
             return True, None
         except Exception as e:
@@ -86,20 +83,20 @@ class SupabaseService:
     async def get_dur_by_ingr(cls, ingr_text: str):
         if not ingr_text:
             return []
+
         ingr_list = [
-            i.strip()
-            for i in ingr_text.replace(",", "/").split("/")
-            if len(i.strip()) > 1
+            i.strip() for i in ingr_text.replace(",", "/").split("/") if len(i.strip()) > 1
         ]
         dur_data = await cls._get_dur_data_from_supabase(ingr_list)
+
         results = []
         for d in dur_data:
             results.append(
                 {
-                    "type": d["dur_type"],
-                    "ingr_name": d["ingr_kor_name"],
-                    "warning_msg": d["prohbt_content"] or d["remark"],
-                    "severity": d["critical_value"],
+                    "type": d.get("dur_type"),
+                    "ingr_name": d.get("ingr_kor_name"),
+                    "warning_msg": d.get("prohbt_content") or d.get("remark"),
+                    "severity": d.get("critical_value"),
                 }
             )
         return results
@@ -108,6 +105,7 @@ class SupabaseService:
     async def get_enriched_dur_info(cls, ingr_list: list):
         unique_ingrs = sorted(list(set([i.upper() for i in ingr_list])))
         enriched_data = []
+
         from services.drug_service import DrugService as OriginalDrugService
 
         for ingr in unique_ingrs:
@@ -117,8 +115,13 @@ class SupabaseService:
                 summary = await AIService.summarize_fda_warning(fda_warn)
                 if summary:
                     fda_warn = summary
+
             enriched_data.append(
-                {"ingredient": ingr, "kr_durs": durs, "fda_warning": fda_warn}
+                {
+                    "ingredient": ingr,
+                    "kr_durs": durs,
+                    "fda_warning": fda_warn,
+                }
             )
         return enriched_data
 
@@ -126,12 +129,15 @@ class SupabaseService:
     async def _get_kr_durs_supabase(cls, ingr_name):
         if not ingr_name:
             return []
+
         target_name = ingr_name.strip()
         if not target_name:
             return []
+
         client = cls.get_client()
         if not client:
             return []
+
         dur_list = []
         try:
             is_korean = bool(re.search("[가-힣]", target_name))
@@ -154,7 +160,7 @@ class SupabaseService:
             logger.error(f"[Supabase] DUR query error for '{target_name}': {e}")
             return []
 
-        DUR_TYPE_KOR_MAP = {
+        dur_type_kor_map = {
             "PREGNANCY": "임부 금기/주의",
             "COMBINED": "병용 금기",
             "AGE_SPECIFIC": "연령 금기",
@@ -174,14 +180,15 @@ class SupabaseService:
 
         grouped_results = {}
         for d in dur_list:
-            kor_type = DUR_TYPE_KOR_MAP.get(d["dur_type"], d["dur_type"])
-            content = (d["prohbt_content"] or d["remark"] or "").strip()
+            kor_type = dur_type_kor_map.get(d.get("dur_type"), d.get("dur_type"))
+            content = (d.get("prohbt_content") or d.get("remark") or "").strip()
             if not content:
                 continue
+
             if kor_type not in grouped_results:
                 grouped_results[kor_type] = {
                     "type": kor_type,
-                    "kor_name": d["ingr_kor_name"],
+                    "kor_name": d.get("ingr_kor_name"),
                     "warnings": set(),
                 }
             grouped_results[kor_type]["warnings"].add(content)
@@ -203,6 +210,7 @@ class SupabaseService:
         client = cls.get_client()
         if not client:
             return []
+
         all_results = []
         for ingr in ingr_list:
             if not ingr:
@@ -227,6 +235,7 @@ class SupabaseService:
                     all_results.extend(response.data)
             except Exception as e:
                 logger.error(f"[Supabase] Batch DUR query error for '{target}': {e}")
+
         return all_results
 
     @classmethod
@@ -234,6 +243,7 @@ class SupabaseService:
         client = cls.get_client()
         if not client:
             return None
+
         try:
             response = (
                 client.table("search_cache")
@@ -261,6 +271,7 @@ class SupabaseService:
         client = cls.get_client()
         if not client:
             return False
+
         try:
             payload = {
                 "query_text": query_text,
@@ -281,13 +292,123 @@ class SupabaseService:
             return False
 
     @classmethod
-    async def search_drugs(cls, query_text: str, limit: int = 20):
-        """Supabase의 unified_drug_info 테이블에서 약품 검색"""
+    async def search_ingredient_scores_by_symptom(
+        cls,
+        keyword: str,
+        raw_query: str = "",
+        max_rows: int = 5000,
+        batch_size: int = 1000,
+    ):
+        """
+        Return ranked ingredient scores from unified_drug_info rows matched by efficacy.
+        Each score represents how frequently the ingredient appears in matched rows,
+        which is used as a direct relevance proxy for the symptom.
+        """
         client = cls.get_client()
         if not client:
             return []
+
+        symptom_term = (keyword or "").strip()
+        if not symptom_term and raw_query:
+            symptom_term = raw_query.strip()
+        if not symptom_term:
+            return []
+
+        rows = []
+        start = 0
+        while start < max_rows:
+            end = min(start + batch_size - 1, max_rows - 1)
+            try:
+                response = (
+                    client.table("unified_drug_info")
+                    .select("main_ingr_eng, efficacy")
+                    .ilike("efficacy", f"%{symptom_term}%")
+                    .range(start, end)
+                    .execute()
+                )
+                batch = response.data or []
+            except Exception as e:
+                logger.warning(
+                    f"[Supabase] Symptom efficacy query failed for term '{symptom_term}': {e}"
+                )
+                return []
+
+            if not batch:
+                break
+
+            rows.extend(batch)
+            if len(batch) < (end - start + 1):
+                break
+            start += batch_size
+
+        def extract_ingredient_tokens(text: str):
+            if not text:
+                return []
+
+            cleaned = re.sub(r"\([^)]*\)", " ", str(text))
+            cleaned = re.sub(
+                r"\b\d+(\.\d+)?\s*(mg|mcg|g|ml|%)\b", " ", cleaned, flags=re.I
+            )
+            parts = re.split(r"[,;/+\n]| and | AND ", cleaned)
+
+            tokens = []
+            for part in parts:
+                token = re.sub(r"\s{2,}", " ", part).strip(" .:-_")
+                if len(token) < 3:
+                    continue
+                tokens.append(token)
+            return tokens
+
+        scores = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for token in extract_ingredient_tokens(row.get("main_ingr_eng")):
+                if not re.search(r"[A-Za-z]", token):
+                    continue
+                normalized = canonicalize_ingredient_name(token)
+                if not normalized:
+                    continue
+                scores[normalized] = scores.get(normalized, 0) + 1
+
+        if not scores:
+            return []
+
+        ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+        return [{"ingredient": name, "score": score} for name, score in ranked]
+
+    @classmethod
+    async def search_ingredients_by_symptom(
+        cls,
+        keyword: str,
+        raw_query: str = "",
+        top_n: int = 8,
+        max_rows: int = 5000,
+        limit: int = None,
+    ):
+        if isinstance(limit, int) and limit > 0:
+            max_rows = limit
+
+        ranked = await cls.search_ingredient_scores_by_symptom(
+            keyword=keyword,
+            raw_query=raw_query,
+            max_rows=max_rows,
+        )
+        if not ranked:
+            return []
+
+        ingredients = [item["ingredient"] for item in ranked if item.get("ingredient")]
+        if top_n is None or top_n <= 0:
+            return ingredients
+        return ingredients[:top_n]
+
+    @classmethod
+    async def search_drugs(cls, query_text: str, limit: int = 20):
+        client = cls.get_client()
+        if not client:
+            return []
+
         try:
-            # item_name 또는 entp_name에 검색어 포함 여부 확인 (ilike 사용)
             response = (
                 client.table("unified_drug_info")
                 .select("item_name, entp_name")
@@ -302,10 +423,10 @@ class SupabaseService:
 
     @classmethod
     async def get_user_profile(cls, user_id: str):
-        """Supabase의 user_profile 테이블에서 사용자 프로필 조회 (UUID 지원)"""
         client = cls.get_client()
         if not client:
             return None
+
         try:
             response = (
                 client.table("user_profile")
@@ -321,11 +442,18 @@ class SupabaseService:
         return None
 
     @classmethod
-    async def update_user_profile(cls, user_id: str, current_medications: str, allergies: str, chronic_diseases: str, is_pregnant: bool = False):
-        """Supabase의 user_profile 테이블에 사용자 프로필 저장/업데이트 (UUID 지원)"""
+    async def update_user_profile(
+        cls,
+        user_id: str,
+        current_medications: str,
+        allergies: str,
+        chronic_diseases: str,
+        is_pregnant: bool = False,
+    ):
         client = cls.get_client()
         if not client:
             return None
+
         try:
             payload = {
                 "user_id": str(user_id),
@@ -346,10 +474,10 @@ class SupabaseService:
 
     @classmethod
     async def delete_user_profile(cls, user_id: str):
-        """사용자 프로필 데이터 삭제"""
         client = cls.get_client()
         if not client:
             return False
+
         try:
             client.table("user_profile").delete().eq("user_id", str(user_id)).execute()
             return True
