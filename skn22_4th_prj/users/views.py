@@ -33,10 +33,27 @@ def register_view(request):
             user, error = loop.run_until_complete(SupabaseService.auth_sign_up(email, password))
             
             if user:
+                # 선택된 약 이름으로 main_ingr_eng 조회
+                drug_names = [n.strip() for n in current_medications.split(",") if n.strip()]
+                main_ingr_eng = loop.run_until_complete(
+                    SupabaseService.get_main_ingr_eng_for_drugs(drug_names)
+                )
                 # 회원가입 성공 시 프로필 생성
                 loop.run_until_complete(SupabaseService.update_user_profile(
-                    user.id, current_medications, allergies, chronic_diseases, is_pregnant
+                    user.id, current_medications, allergies, chronic_diseases, is_pregnant, main_ingr_eng
                 ))
+                # 회원가입 후 자동 로그인
+                sign_in_user, sign_in_session = loop.run_until_complete(
+                    SupabaseService.auth_sign_in(email, password)
+                )
+                if sign_in_user and sign_in_session:
+                    request.session["supabase_user"] = {
+                        "id": sign_in_user.id,
+                        "email": sign_in_user.email,
+                        "display_name": email.split('@')[0]
+                    }
+                    return JsonResponse({"status": "success", "redirect": "/"})
+                # 자동 로그인 실패 시 로그인 페이지로 이동
                 return JsonResponse({"status": "success", "redirect": "/auth/login/"})
             else:
                 if error == "exists":
@@ -106,7 +123,11 @@ async def profile_view(request):
             chronic_diseases = request.POST.get("chronic_diseases", "")
             is_pregnant = request.POST.get("is_pregnant") == "on"
             
-            updated_profile = await UserService.update_profile(user_info, current_medications, allergies, chronic_diseases, is_pregnant)
+            # 선택된 약 이름으로 main_ingr_eng 조회
+            drug_names = [n.strip() for n in current_medications.split(",") if n.strip()]
+            main_ingr_eng = await SupabaseService.get_main_ingr_eng_for_drugs(drug_names)
+            
+            updated_profile = await UserService.update_profile(user_info, current_medications, allergies, chronic_diseases, is_pregnant, main_ingr_eng)
             if updated_profile:
                 profile = updated_profile
                 message = "건강 정보가 성공적으로 저장되었습니다."

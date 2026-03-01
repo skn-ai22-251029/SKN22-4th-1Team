@@ -25,14 +25,14 @@ class UserService:
         return UserService._to_profile_namespace(profile_data)
 
     @staticmethod
-    async def update_profile(user_info: dict, current_medications: str, allergies: str, chronic_diseases: str, is_pregnant: bool = False):
+    async def update_profile(user_info: dict, current_medications: str, allergies: str, chronic_diseases: str, is_pregnant: bool = False, main_ingr_eng: str = ""):
         """Supabase에 유저 프로필 저장"""
         if not user_info or "id" not in user_info:
             return None
             
         from services.supabase_service import SupabaseService
         profile_data = await SupabaseService.update_user_profile(
-            user_info["id"], current_medications, allergies, chronic_diseases, is_pregnant
+            user_info["id"], current_medications, allergies, chronic_diseases, is_pregnant, main_ingr_eng
         )
         return UserService._to_profile_namespace(profile_data) if profile_data else None
 

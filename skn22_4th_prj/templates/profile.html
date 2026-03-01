@@ -10,6 +10,33 @@ body{font-family:'Pretendard',sans-serif}
 .glass-card{background:rgba(255,255,255,.98);border:1px solid #e2e8f0;box-shadow:0 4px 20px rgba(0,0,0,.03)}
 .dbox{min-height:3.5rem;background:#f8fafc;border:1px solid #f1f5f9;display:flex;align-items:center;border-radius:1rem;padding:0 1.25rem}
 .earea{display:none;width:100%;border-radius:1rem;padding:1rem 1.25rem;border:2px solid #3b82f6;outline:none;font-size:.875rem}
+
+/* ── 자동완성 스타일 ── */
+.med-edit-area{display:none;}
+.med-edit-area.active{display:block;}
+.autocomplete-wrapper{position:relative}
+.autocomplete-dropdown{position:absolute;left:0;right:0;top:100%;margin-top:4px;background:#fff;border:1px solid rgba(59,130,246,.2);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.10);max-height:240px;overflow-y:auto;z-index:50;display:none}
+.autocomplete-dropdown.show{display:block}
+.autocomplete-item{padding:10px 16px;cursor:pointer;font-size:14px;color:#334155;transition:background .15s;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.autocomplete-item:first-child{border-radius:12px 12px 0 0}
+.autocomplete-item:last-child{border-radius:0 0 12px 12px}
+.autocomplete-item:hover,.autocomplete-item.active{background:linear-gradient(135deg,#eff6ff,#e0e7ff)}
+.autocomplete-item .drug-name{font-weight:500}
+.autocomplete-item .drug-company{color:#94a3b8;font-size:12px;white-space:nowrap}
+.autocomplete-no-result{padding:14px 16px;text-align:center;color:#94a3b8;font-size:13px}
+.med-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.med-tag{display:inline-flex;align-items:center;gap:6px;background:linear-gradient(135deg,#eff6ff,#dbeafe);color:#1e40af;font-size:13px;font-weight:500;padding:5px 10px 5px 12px;border-radius:20px;border:1px solid rgba(59,130,246,.15);animation:tagIn .2s ease-out}
+.med-tag button{background:none;border:none;cursor:pointer;color:#60a5fa;font-size:16px;line-height:1;padding:0 2px;transition:color .15s}
+.med-tag button:hover{color:#dc2626}
+@keyframes tagIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+
+/* +추가 버튼 */
+.med-input-row{display:flex;gap:8px;align-items:stretch}
+.med-input-row .autocomplete-wrapper{flex:1}
+.btn-add-med{flex-shrink:0;padding:0 18px;border:none;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#06b6d4);color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:all .25s ease;white-space:nowrap;display:flex;align-items:center;gap:4px;box-shadow:0 4px 12px rgba(59,130,246,.2)}
+.btn-add-med:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(59,130,246,.3)}
+.btn-add-med:active{transform:scale(.97)}
+.btn-add-med:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
 </style>
 </head>
 <body class="bg-blue-50/30 min-h-screen text-slate-800">
@@ -44,11 +71,65 @@ body{font-family:'Pretendard',sans-serif}
 <div class="glass-card rounded-3xl p-8">
 <form action="/user/profile/" method="post" class="space-y-8">{% csrf_token %}<input type="hidden" name="action" value="update_profile">
 
-<div class="space-y-3"><div class="flex justify-between items-center"><label class="block text-sm font-bold text-slate-700">현재 복용 중인 약</label><button type="button" onclick="enableEdit('meds')" class="text-xs font-bold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition-all">수정</button></div><div id="meds-display" class="dbox text-slate-600 text-sm font-medium">{{ meds_display }}</div><textarea name="current_medications" id="meds-input" rows="3" class="earea font-medium">{{ meds_value }}</textarea></div>
+<!-- 현재 복용 중인 약 (자동완성) -->
+<div class="space-y-3">
+  <div class="flex justify-between items-center">
+    <label class="block text-sm font-bold text-slate-700">현재 복용 중인 약</label>
+    <button type="button" onclick="enableMedEdit()" class="text-xs font-bold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition-all">수정</button>
+  </div>
+  <div id="meds-display" class="dbox text-slate-600 text-sm font-medium">{{ meds_display }}</div>
+  <!-- 자동완성 편집 영역 -->
+  <div id="meds-edit-area" class="med-edit-area">
+    <div class="med-input-row">
+      <div class="autocomplete-wrapper">
+        <input type="text" id="med_search" autocomplete="off"
+          class="w-full border-2 border-blue-500 rounded-xl py-3 px-4 outline-none text-sm font-medium"
+          placeholder="약 이름을 검색하세요 (예: 타이레놀)" />
+        <div id="med_dropdown" class="autocomplete-dropdown"></div>
+      </div>
+      <button type="button" id="btn_add_med" class="btn-add-med" disabled>+추가</button>
+    </div>
+    <div id="med_tags" class="med-tags"></div>
+  </div>
+  <input type="hidden" name="current_medications" id="medications_hidden" value="{{ meds_value }}" />
+</div>
 
-<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-<div class="space-y-3"><div class="flex justify-between items-center"><label class="block text-sm font-bold text-slate-700">알레르기 정보</label><button type="button" onclick="enableEdit('allergy')" class="text-xs font-bold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition-all">수정</button></div><div id="allergy-display" class="dbox text-slate-600 text-sm font-medium">{{ allergy_display }}</div><textarea name="allergies" id="allergy-input" rows="3" class="earea font-medium">{{ allergy_value }}</textarea></div>
-<div class="space-y-3"><div class="flex justify-between items-center"><label class="block text-sm font-bold text-slate-700">기저질환</label><button type="button" onclick="enableEdit('disease')" class="text-xs font-bold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition-all">수정</button></div><div id="disease-display" class="dbox text-slate-600 text-sm font-medium">{{ disease_display }}</div><textarea name="chronic_diseases" id="disease-input" rows="3" class="earea font-medium">{{ disease_value }}</textarea></div>
+<!-- 기저질환 -->
+<div class="space-y-3">
+  <div class="flex justify-between items-center">
+    <label class="block text-sm font-bold text-slate-700">기저질환</label>
+    <button type="button" onclick="enableTagEdit('disease')" class="text-xs font-bold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition-all">수정</button>
+  </div>
+  <div id="disease-display" class="dbox text-slate-600 text-sm font-medium">{{ disease_display }}</div>
+  <div id="disease-edit-area" class="med-edit-area">
+    <div class="med-input-row">
+      <input type="text" id="disease_input" autocomplete="off"
+        class="w-full border-2 border-blue-500 rounded-xl py-3 px-4 outline-none text-sm font-medium"
+        placeholder="질환명을 입력해주세요 (예: 당뇨, 고혈압)" />
+      <button type="button" id="btn_add_disease" class="btn-add-med" disabled>+추가</button>
+    </div>
+    <div id="disease_tags" class="med-tags"></div>
+  </div>
+  <input type="hidden" name="chronic_diseases" id="disease_hidden" value="{{ disease_value }}" />
+</div>
+
+<!-- 알레르기 정보 -->
+<div class="space-y-3">
+  <div class="flex justify-between items-center">
+    <label class="block text-sm font-bold text-slate-700">알레르기 정보</label>
+    <button type="button" onclick="enableTagEdit('allergy')" class="text-xs font-bold text-blue-600 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-600 hover:text-white transition-all">수정</button>
+  </div>
+  <div id="allergy-display" class="dbox text-slate-600 text-sm font-medium">{{ allergy_display }}</div>
+  <div id="allergy-edit-area" class="med-edit-area">
+    <div class="med-input-row">
+      <input type="text" id="allergy_input" autocomplete="off"
+        class="w-full border-2 border-blue-500 rounded-xl py-3 px-4 outline-none text-sm font-medium"
+        placeholder="알레르기 원인을 입력해주세요 (예: 항생제, 땅콩)" />
+      <button type="button" id="btn_add_allergy" class="btn-add-med" disabled>+추가</button>
+    </div>
+    <div id="allergy_tags" class="med-tags"></div>
+  </div>
+  <input type="hidden" name="allergies" id="allergy_hidden" value="{{ allergy_value }}" />
 </div>
 
 <div class="p-6 bg-blue-50/50 rounded-2xl border border-blue-200 flex items-center"><div class="flex items-center gap-3"><input type="checkbox" name="is_pregnant" id="is_pregnant" class="w-6 h-6 rounded border-slate-300 text-blue-600 cursor-pointer" {{ pregnant_checked }}><label for="is_pregnant" class="font-bold text-blue-900 cursor-pointer text-lg">현재 임신 또는 수유 중입니다</label></div></div>
@@ -62,8 +143,219 @@ body{font-family:'Pretendard',sans-serif}
 </div>
 </div>
 <script>
-function enableEdit(id){var d=document.getElementById(id+'-display');var t=document.getElementById(id+'-input');if(d&&t){d.style.display='none';t.style.display='block';t.focus();}}
 function confirmDelete(){if(confirm('정말로 탈퇴하시겠습니까?')){document.getElementById('deleteForm').submit();}}
+
+// ── 약 자동완성 (프로필 수정) ──
+const medSearch   = document.getElementById("med_search");
+const medDropdown = document.getElementById("med_dropdown");
+const medTags     = document.getElementById("med_tags");
+const medHidden   = document.getElementById("medications_hidden");
+
+let selectedMeds = [];
+let debounceTimer = null;
+let activeIdx = -1;
+let pendingDrug = null;
+const btnAddMed = document.getElementById("btn_add_med");
+
+// 기존 복용약을 태그로 초기화
+(function initMeds() {
+  const raw = medHidden.value.trim();
+  if (raw) {
+    selectedMeds = raw.split(",").map(s => s.trim()).filter(Boolean);
+  }
+})();
+
+function syncHiddenInput() { medHidden.value = selectedMeds.join(", "); }
+
+function renderTags() {
+  medTags.innerHTML = "";
+  selectedMeds.forEach((name, idx) => {
+    const tag = document.createElement("span");
+    tag.className = "med-tag";
+    tag.innerHTML = `${name}<button type="button" data-idx="${idx}" aria-label="삭제">&times;</button>`;
+    medTags.appendChild(tag);
+  });
+  medTags.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      selectedMeds.splice(Number(btn.dataset.idx), 1);
+      renderTags();
+      syncHiddenInput();
+    });
+  });
+}
+
+function enableMedEdit() {
+  document.getElementById("meds-display").style.display = "none";
+  const area = document.getElementById("meds-edit-area");
+  area.classList.add("active");
+  renderTags();
+  medSearch.focus();
+}
+
+function selectDrug(itemName) {
+  medSearch.value = itemName;
+  pendingDrug = itemName;
+  btnAddMed.disabled = false;
+  hideDropdown();
+}
+
+function addPendingDrug() {
+  if (pendingDrug && !selectedMeds.includes(pendingDrug)) {
+    selectedMeds.push(pendingDrug);
+    renderTags();
+    syncHiddenInput();
+  }
+  medSearch.value = "";
+  pendingDrug = null;
+  btnAddMed.disabled = true;
+  medSearch.focus();
+}
+
+btnAddMed.addEventListener("click", addPendingDrug);
+
+function hideDropdown() {
+  medDropdown.classList.remove("show");
+  medDropdown.innerHTML = "";
+  activeIdx = -1;
+}
+
+function showDropdown(items) {
+  medDropdown.innerHTML = "";
+  activeIdx = -1;
+  if (items.length === 0) {
+    medDropdown.innerHTML = '<div class="autocomplete-no-result">검색 결과가 없습니다</div>';
+    medDropdown.classList.add("show");
+    return;
+  }
+  items.forEach((item, i) => {
+    const div = document.createElement("div");
+    div.className = "autocomplete-item";
+    div.dataset.index = i;
+    div.innerHTML = `<span class="drug-name">${item.item_name}</span><span class="drug-company">${item.entp_name || ""}</span>`;
+    div.addEventListener("mousedown", (e) => { e.preventDefault(); selectDrug(item.item_name); });
+    medDropdown.appendChild(div);
+  });
+  medDropdown.classList.add("show");
+}
+
+function highlightItem(idx) {
+  const items = medDropdown.querySelectorAll(".autocomplete-item");
+  items.forEach(el => el.classList.remove("active"));
+  if (idx >= 0 && idx < items.length) { items[idx].classList.add("active"); items[idx].scrollIntoView({ block: "nearest" }); }
+}
+
+medSearch.addEventListener("input", () => {
+  const q = medSearch.value.trim();
+  clearTimeout(debounceTimer);
+  pendingDrug = null;
+  btnAddMed.disabled = true;
+  if (q.length < 1) { hideDropdown(); return; }
+  debounceTimer = setTimeout(() => {
+    fetch(`/drug/search/?q=${encodeURIComponent(q)}`)
+      .then(res => res.json())
+      .then(data => {
+        const qLower = q.toLowerCase();
+        data.sort((a, b) => {
+          const posA = (a.item_name || "").toLowerCase().indexOf(qLower);
+          const posB = (b.item_name || "").toLowerCase().indexOf(qLower);
+          const sA = posA === -1 ? 9999 : posA;
+          const sB = posB === -1 ? 9999 : posB;
+          return sA - sB;
+        });
+        showDropdown(data);
+      })
+      .catch(() => hideDropdown());
+  }, 300);
+});
+
+medSearch.addEventListener("keydown", (e) => {
+  const items = medDropdown.querySelectorAll(".autocomplete-item");
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (items.length && activeIdx >= 0) { items[activeIdx].dispatchEvent(new Event("mousedown")); }
+    else if (pendingDrug) { addPendingDrug(); }
+    return;
+  }
+  if (!items.length) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, items.length - 1); highlightItem(activeIdx); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); highlightItem(activeIdx); }
+  else if (e.key === "Escape") { hideDropdown(); }
+});
+
+medSearch.addEventListener("blur", () => { setTimeout(hideDropdown, 200); });
+
+// ── 기저질환 & 알레르기 태그 관리 (공통 팩토리) ──
+function createTagManager(inputId, btnId, tagsId, hiddenId) {
+  const input  = document.getElementById(inputId);
+  const btn    = document.getElementById(btnId);
+  const tagsEl = document.getElementById(tagsId);
+  const hidden = document.getElementById(hiddenId);
+  const items  = [];
+
+  // 기존 값 초기화
+  const raw = hidden.value.trim();
+  if (raw) {
+    raw.split(",").map(s => s.trim()).filter(Boolean).forEach(v => items.push(v));
+  }
+
+  function sync() { hidden.value = items.join(", "); }
+
+  function render() {
+    tagsEl.innerHTML = "";
+    items.forEach((name, idx) => {
+      const tag = document.createElement("span");
+      tag.className = "med-tag";
+      tag.innerHTML = `${name}<button type="button" data-idx="${idx}" aria-label="삭제">&times;</button>`;
+      tagsEl.appendChild(tag);
+    });
+    tagsEl.querySelectorAll("button").forEach(b => {
+      b.addEventListener("click", () => {
+        items.splice(Number(b.dataset.idx), 1);
+        render();
+        sync();
+      });
+    });
+  }
+
+  function addItem() {
+    const val = input.value.trim();
+    if (val && !items.includes(val)) {
+      items.push(val);
+      render();
+      sync();
+    }
+    input.value = "";
+    btn.disabled = true;
+    input.focus();
+  }
+
+  input.addEventListener("input", () => {
+    btn.disabled = input.value.trim().length === 0;
+  });
+
+  btn.addEventListener("click", addItem);
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (input.value.trim().length > 0) addItem();
+    }
+  });
+
+  return { render };
+}
+
+const diseaseManager = createTagManager("disease_input", "btn_add_disease", "disease_tags", "disease_hidden");
+const allergyManager = createTagManager("allergy_input", "btn_add_allergy", "allergy_tags", "allergy_hidden");
+
+function enableTagEdit(id) {
+  document.getElementById(id + "-display").style.display = "none";
+  const area = document.getElementById(id + "-edit-area");
+  area.classList.add("active");
+  if (id === "disease") diseaseManager.render();
+  if (id === "allergy") allergyManager.render();
+  document.getElementById(id + "_input").focus();
+}
 </script>
 </body>
 </html>

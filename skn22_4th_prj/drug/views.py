@@ -12,14 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 class DrugSearchView(APIView):
-    async def get(self, request):
+    def get(self, request):
         query = request.query_params.get("q", "").strip()
         if not query:
             return Response([])
 
         from services.supabase_service import SupabaseService
         # Supabase API를 통한 약품 검색
-        results = await SupabaseService.search_drugs(query)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            results = loop.run_until_complete(SupabaseService.search_drugs(query))
+        finally:
+            loop.close()
 
         return Response(results)
 

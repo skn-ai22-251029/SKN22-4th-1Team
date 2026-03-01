@@ -301,6 +301,34 @@ class SupabaseService:
             return []
 
     @classmethod
+    async def get_main_ingr_eng_for_drugs(cls, drug_names: list):
+        """약 이름 목록으로 unified_drug_info에서 main_ingr_eng 값을 조회하여 반환"""
+        client = cls.get_client()
+        if not client or not drug_names:
+            return ""
+        try:
+            all_ingrs = []
+            for name in drug_names:
+                name = name.strip()
+                if not name:
+                    continue
+                response = (
+                    client.table("unified_drug_info")
+                    .select("main_ingr_eng")
+                    .eq("item_name", name)
+                    .limit(1)
+                    .execute()
+                )
+                if response.data and response.data[0].get("main_ingr_eng"):
+                    ingr = response.data[0]["main_ingr_eng"].strip()
+                    if ingr and ingr not in all_ingrs:
+                        all_ingrs.append(ingr)
+            return ", ".join(all_ingrs)
+        except Exception as e:
+            logger.error(f"[Supabase] main_ingr_eng lookup error: {e}")
+            return ""
+
+    @classmethod
     async def get_user_profile(cls, user_id: str):
         """Supabase의 user_profile 테이블에서 사용자 프로필 조회 (UUID 지원)"""
         client = cls.get_client()
@@ -321,7 +349,7 @@ class SupabaseService:
         return None
 
     @classmethod
-    async def update_user_profile(cls, user_id: str, current_medications: str, allergies: str, chronic_diseases: str, is_pregnant: bool = False):
+    async def update_user_profile(cls, user_id: str, current_medications: str, allergies: str, chronic_diseases: str, is_pregnant: bool = False, main_ingr_eng: str = ""):
         """Supabase의 user_profile 테이블에 사용자 프로필 저장/업데이트 (UUID 지원)"""
         client = cls.get_client()
         if not client:
@@ -333,6 +361,7 @@ class SupabaseService:
                 "allergies": allergies,
                 "chronic_diseases": chronic_diseases,
                 "is_pregnant": is_pregnant,
+                "main_ingr_eng": main_ingr_eng,
             }
             response = (
                 client.table("user_profile")
