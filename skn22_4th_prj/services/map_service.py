@@ -1,10 +1,12 @@
 import asyncio
 import logging
 import re
+from urllib.parse import quote_plus
 
 import httpx
 
 from services.ai_service_v2 import AIService
+from services.amazon_rank_service import AmazonRankService
 from services.ingredient_utils import canonicalize_ingredient_name
 
 logger = logging.getLogger(__name__)
@@ -12,7 +14,57 @@ logger = logging.getLogger(__name__)
 
 class MapService:
     _FDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
+    _FDA_NDC_URL = "https://api.fda.gov/drug/ndc.json"
     _OTC_FILTER = 'openfda.product_type:"HUMAN OTC DRUG"'
+    _NDC_MARKETING_CACHE = {}
+    _NDC_LOOKUP_SEMAPHORE = asyncio.Semaphore(6)
+    _SYMPTOM_TO_FDA_TERM = {
+        "두통": "headache",
+        "편두통": "migraine",
+        "소화불량": "indigestion",
+        "기침": "cough",
+        "감기": "cold",
+        "발열": "fever",
+        "통증": "pain",
+        "염좌": "sprain",
+        "찰과상": "wound",
+        "상처": "wound",
+        "화상": "burn",
+        "곤충교상": "insect bite",
+    }
+    _DEFAULT_KR_SUMMARY = (
+        "증상 완화를 위한 일반의약품으로 안내됩니다. "
+        "복용 전 용법·용량과 주의사항을 확인하세요."
+    )
+    _BENEFIT_RULES = [
+        ("진통", "통증 완화"),
+        ("해열", "발열 완화"),
+        ("소염", "염증 완화"),
+        ("기침", "기침 완화"),
+        ("콧물", "콧물 완화"),
+        ("비염", "비염 증상 완화"),
+        ("알레르기", "알레르기 증상 완화"),
+        ("속쓰림", "위산/속쓰림 완화"),
+        ("소화", "소화 불편 완화"),
+        ("복통", "복부 통증 완화"),
+        ("설사", "설사 증상 완화"),
+        ("감기", "감기 증상 완화"),
+        ("수면", "수면 보조"),
+        ("pain", "통증 완화"),
+        ("analgesic", "통증 완화"),
+        ("fever", "발열 완화"),
+        ("antipyretic", "발열 완화"),
+        ("anti-inflammatory", "염증 완화"),
+        ("inflammation", "염증 완화"),
+        ("cough", "기침 완화"),
+        ("allergy", "알레르기 증상 완화"),
+        ("rhinitis", "비염 증상 완화"),
+        ("cold", "감기 증상 완화"),
+        ("indigestion", "소화 불편 완화"),
+        ("heartburn", "위산/속쓰림 완화"),
+        ("diarrhea", "설사 증상 완화"),
+        ("sleep", "수면 보조"),
+    ]
 
     @classmethod
     async def find_nearby_pharmacies(cls, lat: float, lng: float):
@@ -50,6 +102,34 @@ class MapService:
         return normalized
 
     @classmethod
+    def _normalize_identity_text(cls, value: str) -> str:
+        return " ".join(str(value or "").strip().upper().split())
+
+    @classmethod
+    def _product_identity_key(cls, product: dict):
+        brand = cls._normalize_identity_text((product or {}).get("brand_name"))
+        manufacturer = cls._normalize_identity_text(
+            (product or {}).get("manufacturer_name")
+        )
+        active = cls._normalize_identity_text((product or {}).get("active_ingredient"))
+
+        if manufacturer and manufacturer != "UNKNOWN MANUFACTURER":
+            return (brand, manufacturer)
+        return (brand, active)
+
+    @classmethod
+    def _dedupe_products(cls, products: list) -> list:
+        unique = {}
+        for product in products or []:
+            if not isinstance(product, dict):
+                continue
+            key = cls._product_identity_key(product)
+            if key in unique:
+                continue
+            unique[key] = product
+        return list(unique.values())
+
+    @classmethod
     def _extract_active_ingredient_text(cls, item: dict) -> str:
         active_values = item.get("active_ingredient") or []
         if isinstance(active_values, list):
@@ -68,16 +148,241 @@ class MapService:
         return "Unknown"
 
     @classmethod
+    def _split_ingredient_tokens_from_text(cls, text: str) -> list:
+        raw = str(text or "").strip()
+        if not raw:
+            return []
+
+        parts = re.split(r"\||/|,|;|\bAND\b|\bWITH\b|\+", raw, flags=re.IGNORECASE)
+        tokens = []
+        seen = set()
+        for part in parts:
+            token = cls._normalize_ingredient(part)
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+        return tokens
+
+    @classmethod
+    def _split_ingredient_tokens_from_values(cls, values) -> list:
+        tokens = []
+        seen = set()
+        for raw in values or []:
+            parts = re.split(r"\||/|,|;|\bAND\b|\bWITH\b|\+", str(raw), flags=re.IGNORECASE)
+            for part in parts:
+                token = cls._normalize_ingredient(part)
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                tokens.append(token)
+        return tokens
+
+    @classmethod
+    def _extract_product_ingredient_tokens(cls, item: dict) -> list:
+        openfda = item.get("openfda") or {}
+        tokens = cls._split_ingredient_tokens_from_values(openfda.get("substance_name") or [])
+        if not tokens:
+            tokens = cls._split_ingredient_tokens_from_values(openfda.get("generic_name") or [])
+        if tokens:
+            return tokens
+
+        active_values = item.get("active_ingredient") or []
+        if isinstance(active_values, str):
+            active_values = [active_values]
+        return cls._split_ingredient_tokens_from_values(active_values)
+
+    @classmethod
+    def _extract_product_ndc(cls, item: dict) -> str:
+        openfda = item.get("openfda") or {}
+        product_ndc_list = openfda.get("product_ndc") or []
+        if isinstance(product_ndc_list, list) and product_ndc_list:
+            value = str(product_ndc_list[0] or "").strip()
+            if value:
+                return value
+
+        package_ndc_list = openfda.get("package_ndc") or []
+        if isinstance(package_ndc_list, list) and package_ndc_list:
+            raw = str(package_ndc_list[0] or "").strip()
+            if raw:
+                # package_ndc: labeler-product-package -> keep labeler-product
+                parts = raw.split("-")
+                if len(parts) >= 2:
+                    return f"{parts[0]}-{parts[1]}"
+                return raw
+        return ""
+
+    @classmethod
+    def _is_homeopathic_marketing_category(cls, category: str) -> bool:
+        return "HOMEOPATHIC" in str(category or "").upper()
+
+    @classmethod
+    async def _get_marketing_category_by_ndc(
+        cls, product_ndc: str, client: httpx.AsyncClient
+    ) -> str:
+        key = str(product_ndc or "").strip()
+        if not key:
+            return ""
+        if key in cls._NDC_MARKETING_CACHE:
+            return cls._NDC_MARKETING_CACHE.get(key) or ""
+
+        query = f'product_ndc:"{key}"'
+        url = f"{cls._FDA_NDC_URL}?search={query}&limit=1"
+
+        async with cls._NDC_LOOKUP_SEMAPHORE:
+            try:
+                res = await client.get(url)
+                if res.status_code != 200:
+                    cls._NDC_MARKETING_CACHE[key] = ""
+                    return ""
+                results = res.json().get("results", [])
+                category = str((results[0] or {}).get("marketing_category") or "") if results else ""
+                cls._NDC_MARKETING_CACHE[key] = category
+                return category
+            except Exception as e:
+                logger.debug(f"NDC marketing_category lookup failed for {key}: {e}")
+                cls._NDC_MARKETING_CACHE[key] = ""
+                return ""
+
+    @classmethod
+    async def _build_homeopathic_ndc_set(
+        cls, items: list, client: httpx.AsyncClient
+    ) -> set:
+        ndcs = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            ndc = cls._extract_product_ndc(item)
+            if ndc:
+                ndcs.append(ndc)
+        ndcs = sorted(set(ndcs))
+        if not ndcs:
+            return set()
+
+        categories = await asyncio.gather(
+            *[cls._get_marketing_category_by_ndc(ndc, client) for ndc in ndcs]
+        )
+        return {
+            ndc
+            for ndc, category in zip(ndcs, categories)
+            if cls._is_homeopathic_marketing_category(category)
+        }
+
+    @classmethod
+    def _infer_benefit_brief_kr(cls, text: str) -> str:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return "증상 완화 보조"
+        for needle, benefit in cls._BENEFIT_RULES:
+            if needle in raw:
+                return benefit
+        return "증상 완화 보조"
+
+    @classmethod
     def _to_product_payload(cls, item: dict) -> dict:
         openfda = item.get("openfda") or {}
         brand_name = (openfda.get("brand_name") or ["Unknown"])[0]
+        manufacturer_name = (openfda.get("manufacturer_name") or ["Unknown Manufacturer"])[0]
         purpose = (item.get("purpose") or ["No purpose specified."])[0]
+        set_id = str(item.get("set_id") or "").strip()
+        product_ndc = cls._extract_product_ndc(item)
+
+        if set_id:
+            dailymed_url = (
+                f"https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid={set_id}"
+            )
+        else:
+            brand_query = quote_plus(str(brand_name or "").strip())
+            dailymed_url = (
+                f"https://dailymed.nlm.nih.gov/dailymed/search.cfm?query={brand_query}"
+                if brand_query
+                else ""
+            )
+        fda_label_api_url = (
+            f'https://api.fda.gov/drug/label.json?search=openfda.product_ndc:"{product_ndc}"&limit=1'
+            if product_ndc
+            else ""
+        )
 
         return {
             "brand_name": brand_name,
+            "manufacturer_name": manufacturer_name,
             "purpose": purpose,
+            "summary_kr": "",
             "active_ingredient": cls._extract_active_ingredient_text(item),
+            "dailymed_url": dailymed_url,
+            "fda_label_api_url": fda_label_api_url,
         }
+
+    @staticmethod
+    def _contains_hangul(text: str) -> bool:
+        return bool(re.search(r"[가-힣]", str(text or "")))
+
+    @classmethod
+    def _fallback_korean_summary(cls, original_text: str = "") -> str:
+        if cls._contains_hangul(original_text):
+            summary = str(original_text).strip()
+        else:
+            summary = cls._DEFAULT_KR_SUMMARY
+        if len(summary) <= 150:
+            return summary
+        return summary[:147].rstrip() + "..."
+
+    @classmethod
+    async def _attach_korean_summaries(cls, products: list) -> list:
+        if not isinstance(products, list) or not products:
+            return products
+
+        purposes = [str((p or {}).get("purpose") or "").strip() for p in products]
+        translated = []
+        try:
+            translated = await AIService.translate_purposes(purposes)
+        except Exception as e:
+            logger.warning(f"Purpose summarization failed: {e}")
+            translated = []
+
+        for i, product in enumerate(products):
+            summary = ""
+            if i < len(translated):
+                summary = str(translated[i] or "").strip()
+            if not summary or not cls._contains_hangul(summary):
+                src = purposes[i] if i < len(purposes) else ""
+                summary = cls._fallback_korean_summary(src)
+            product["summary_kr"] = summary
+        return products
+
+    @classmethod
+    async def ensure_mapping_result_summaries(cls, mapping_result: dict) -> dict:
+        if not isinstance(mapping_result, dict):
+            return mapping_result
+
+        match_type = str(mapping_result.get("match_type") or "").upper()
+        if match_type == "FULL_MATCH":
+            products = mapping_result.get("recommendations")
+            if isinstance(products, list):
+                needs = any(not str((p or {}).get("summary_kr") or "").strip() for p in products)
+                if needs:
+                    await cls._attach_korean_summaries(products)
+            return mapping_result
+
+        if match_type == "COMPONENT_MATCH":
+            rec_groups = mapping_result.get("recommendations")
+            if isinstance(rec_groups, list):
+                for group in rec_groups:
+                    products = (group or {}).get("products")
+                    if not isinstance(products, list):
+                        continue
+                    needs = any(not str((p or {}).get("summary_kr") or "").strip() for p in products)
+                    if needs:
+                        await cls._attach_korean_summaries(products)
+
+            cross = mapping_result.get("cross_ingredient_recommendations")
+            if isinstance(cross, list):
+                needs = any(not str((p or {}).get("summary_kr") or "").strip() for p in cross)
+                if needs:
+                    await cls._attach_korean_summaries(cross)
+
+        return mapping_result
 
     @classmethod
     def _contains_ingredient(cls, text: str, ingredient: str) -> bool:
@@ -86,53 +391,165 @@ class MapService:
         return ingredient.upper() in text.upper()
 
     @classmethod
-    async def get_us_otc_products_by_ingredient(cls, ingredient: str, limit: int = 5):
+    def _ingredient_search_variants(cls, ingredient: str) -> list:
+        """Build search variants to improve openFDA hit rate (e.g., NAPROXEN SODIUM)."""
+        base = cls._normalize_ingredient(ingredient)
+        if not base:
+            return []
+
+        variants = [base, f"{base} SODIUM", f"{base} POTASSIUM"]
+        seen = set()
+        ordered = []
+        for token in variants:
+            key = token.strip().upper()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(key)
+        return ordered
+
+    @classmethod
+    def _normalize_symptom_for_fda(cls, symptom: str) -> str:
+        token = str(symptom or "").strip().lower()
+        if not token:
+            return ""
+        mapped = cls._SYMPTOM_TO_FDA_TERM.get(token)
+        if mapped:
+            return mapped
+        return token
+
+    @classmethod
+    def _build_otc_search_query(cls, ingredient_variants: list, symptom: str = "") -> str:
+        symptom_term = cls._normalize_symptom_for_fda(symptom)
+
+        ingredient_clauses = []
+        for var in ingredient_variants:
+            ingredient_clauses.append(f'openfda.substance_name:"{var}"')
+            ingredient_clauses.append(f'openfda.generic_name:"{var}"')
+            ingredient_clauses.append(f'active_ingredient:"{var}"')
+
+        ingredient_query = f"({' +OR+ '.join(ingredient_clauses)})"
+        if symptom_term:
+            symptom_query = f'(indications_and_usage:"{symptom_term}")'
+            return f"{symptom_query}+AND+{ingredient_query}+AND+{cls._OTC_FILTER}"
+        return f"{ingredient_query}+AND+{cls._OTC_FILTER}"
+
+    @classmethod
+    async def get_us_otc_products_by_ingredient(
+        cls, ingredient: str, limit: int = 5, symptom: str = ""
+    ):
         """Fetch OTC products containing the given ingredient from openFDA."""
         normalized_ingredient = cls._normalize_ingredient(ingredient)
         if not normalized_ingredient:
-            return {"ingredient": ingredient, "products": [], "count": 0}
+            return {
+                "ingredient": ingredient,
+                "products": [],
+                "count": 0,
+                "diagnostics": {
+                    "ingredient": ingredient,
+                    "normalized_ingredient": normalized_ingredient,
+                    "reason": "invalid_ingredient",
+                },
+            }
 
-        url = (
-            f"{cls._FDA_LABEL_URL}"
-            f'?search=(openfda.substance_name:"{normalized_ingredient}"'
-            f'+OR+openfda.generic_name:"{normalized_ingredient}")+AND+{cls._OTC_FILTER}'
-            f"&limit=100"
-        )
+        variants = cls._ingredient_search_variants(normalized_ingredient)
+        primary_query = cls._build_otc_search_query(variants, symptom=symptom)
+        fallback_query = cls._build_otc_search_query([normalized_ingredient], symptom="")
+        diagnostics = {
+            "ingredient": ingredient,
+            "normalized_ingredient": normalized_ingredient,
+            "symptom": symptom or "",
+            "search_variants": variants,
+            "primary_hits": 0,
+            "fallback_used": False,
+            "fallback_hits": 0,
+            "homeopathic_filtered": 0,
+            "brand_missing_filtered": 0,
+            "ingredient_mismatch_filtered": 0,
+            "post_filter_items": 0,
+            "deduped_items": 0,
+            "final_products": 0,
+        }
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
-                response = await client.get(url)
+                primary_url = f"{cls._FDA_LABEL_URL}?search={primary_query}&limit=100"
+                response = await client.get(primary_url)
                 if response.status_code != 200:
-                    return {
-                        "ingredient": normalized_ingredient,
-                        "products": [],
-                        "message": "FDA API에서 제품을 찾지 못했습니다.",
-                    }
+                    data = []
+                else:
+                    data = response.json().get("results", [])
+                diagnostics["primary_hits"] = len(data)
 
-                data = response.json().get("results", [])
+                # Fallback for ingredients whose OTC labels are indexed under active_ingredient text.
+                if not data:
+                    diagnostics["fallback_used"] = True
+                    fallback_url = f"{cls._FDA_LABEL_URL}?search={fallback_query}&limit=100"
+                    fallback_res = await client.get(fallback_url)
+                    if fallback_res.status_code == 200:
+                        data = fallback_res.json().get("results", [])
+                    diagnostics["fallback_hits"] = len(data)
+                homeopathic_ndcs = await cls._build_homeopathic_ndc_set(data, client)
+
                 products_info = []
                 for item in data:
                     openfda = item.get("openfda") or {}
                     if not openfda.get("brand_name"):
+                        diagnostics["brand_missing_filtered"] += 1
                         continue
-                    products_info.append(cls._to_product_payload(item))
+                    item_ndc = cls._extract_product_ndc(item)
+                    if item_ndc and item_ndc in homeopathic_ndcs:
+                        diagnostics["homeopathic_filtered"] += 1
+                        continue
+                    ingredient_text = cls._extract_active_ingredient_text(item)
+                    generic_text = " ".join(openfda.get("generic_name") or [])
+                    substance_text = " ".join(openfda.get("substance_name") or [])
+                    searchable = f"{ingredient_text} {generic_text} {substance_text}".upper()
+                    if not any(
+                        cls._contains_ingredient(searchable, var) for var in variants
+                    ):
+                        diagnostics["ingredient_mismatch_filtered"] += 1
+                        continue
+                    payload = cls._to_product_payload(item)
+                    payload["_all_ingredient_tokens"] = cls._extract_product_ingredient_tokens(
+                        item
+                    )
+                    products_info.append(payload)
+                diagnostics["post_filter_items"] = len(products_info)
 
-                unique_products = {
-                    (
-                        (prod.get("brand_name") or "").strip().upper(),
-                        (prod.get("active_ingredient") or "").strip().upper(),
-                    ): prod
-                    for prod in products_info
-                }.values()
+                unique_products = cls._dedupe_products(products_info)
+                diagnostics["deduped_items"] = len(unique_products)
 
                 sorted_products = sorted(
                     list(unique_products), key=lambda x: x.get("brand_name", "")
                 )[: max(limit, 1)]
+                sorted_products = await cls._attach_korean_summaries(sorted_products)
+                for product in sorted_products:
+                    all_tokens = product.get("_all_ingredient_tokens") or []
+                    if not all_tokens:
+                        all_tokens = cls._split_ingredient_tokens_from_text(
+                            product.get("active_ingredient")
+                        )
+
+                    extras = [token for token in all_tokens if token != normalized_ingredient]
+                    benefit = cls._infer_benefit_brief_kr(
+                        product.get("summary_kr") or product.get("purpose")
+                    )
+                    product["other_active_ingredients"] = extras
+                    product["other_active_components"] = [
+                        {"name": token, "benefit": benefit} for token in extras
+                    ]
+                    product.pop("_all_ingredient_tokens", None)
+                sorted_products = await AmazonRankService.enrich_and_sort_products(
+                    sorted_products
+                )
+                diagnostics["final_products"] = len(sorted_products)
 
                 return {
                     "ingredient": normalized_ingredient,
                     "products": sorted_products,
                     "count": len(sorted_products),
+                    "diagnostics": diagnostics,
                 }
             except Exception as e:
                 logger.error(
@@ -142,6 +559,7 @@ class MapService:
                     "ingredient": normalized_ingredient,
                     "products": [],
                     "error": str(e),
+                    "diagnostics": diagnostics,
                 }
 
     @classmethod
@@ -167,31 +585,22 @@ class MapService:
                 res = await client.get(url)
                 if res.status_code == 200 and res.json().get("results"):
                     results = res.json().get("results", [])
+                    homeopathic_ndcs = await cls._build_homeopathic_ndc_set(results, client)
+                    filtered_results = []
+                    for item in results:
+                        ndc = cls._extract_product_ndc(item)
+                        if ndc and ndc in homeopathic_ndcs:
+                            continue
+                        filtered_results.append(item)
+                    results = filtered_results
                     products = [cls._to_product_payload(item) for item in results]
-                    products = list(
-                        {
-                            (
-                                (p.get("brand_name") or "").strip().upper(),
-                                (p.get("active_ingredient") or "").strip().upper(),
-                            ): p
-                            for p in products
-                        }.values()
-                    )[:10]
+                    products = cls._dedupe_products(products)[:10]
 
                     if products:
-                        try:
-                            purposes_to_translate = [p["purpose"] for p in products]
-                            translated_purposes = await AIService.translate_purposes(
-                                purposes_to_translate
-                            )
-                            for i, prod in enumerate(products):
-                                if i < len(translated_purposes):
-                                    prod["purpose"] = translated_purposes[i]
-                        except Exception as translate_error:
-                            logger.warning(
-                                "Purpose translation failed, returning English purposes: %s",
-                                translate_error,
-                            )
+                        products = await cls._attach_korean_summaries(products)
+                        products = await AmazonRankService.enrich_and_sort_products(
+                            products
+                        )
 
                     return {
                         "match_type": "FULL_MATCH",
@@ -211,10 +620,7 @@ class MapService:
         candidate_map = {}
         for rec in component_recommendations:
             for prod in rec.get("products", []):
-                key = (
-                    (prod.get("brand_name") or "").strip().upper(),
-                    (prod.get("active_ingredient") or "").strip().upper(),
-                )
+                key = cls._product_identity_key(prod)
                 if key not in candidate_map:
                     candidate_map[key] = prod
 
@@ -239,7 +645,13 @@ class MapService:
                 )
 
         cross_ingredient_recommendations.sort(
-            key=lambda x: (-x.get("match_count", 0), x.get("brand_name", ""))
+            key=lambda x: (
+                -x.get("match_count", 0),
+                x.get("amazon_rank_value")
+                if isinstance(x.get("amazon_rank_value"), int)
+                else 10**12,
+                x.get("brand_name", ""),
+            )
         )
 
         for rec in component_recommendations:

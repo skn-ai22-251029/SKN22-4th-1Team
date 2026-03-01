@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+import json
 from collections import Counter
 from functools import lru_cache
 
@@ -221,3 +223,114 @@ async def pharmacy_api(request):
     except Exception as e:
         logger.error(f"Error fetching pharmacies: {e}")
         return JsonResponse({"status": "error", "message": str(e)})
+
+
+async def symptom_products_api(request):
+    raw = request.GET.get("ingredients", "").strip()
+    symptom = (request.GET.get("symptom") or "").strip()
+    debug_mode = str(request.GET.get("debug") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    ingredients = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    if not ingredients:
+        return JsonResponse({"status": "error", "message": "ingredients is required"}, status=400)
+
+    from services.map_service import MapService
+    from services.drug_service import DrugService
+    from services.ai_service_v2 import AIService
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def fetch_one(ingr):
+        async with semaphore:
+            try:
+                products_kwargs = {"limit": 5}
+                if symptom:
+                    products_kwargs["symptom"] = symptom
+                products_task = MapService.get_us_otc_products_by_ingredient(
+                    ingr, **products_kwargs
+                )
+                warning_task = DrugService.get_fda_warnings_by_ingr(ingr)
+                products_res, us_warning_raw = await asyncio.gather(products_task, warning_task)
+                return {
+                    "ingredient": ingr,
+                    "products": products_res.get("products", []),
+                    "us_warning_raw": us_warning_raw,
+                    "diagnostics": products_res.get("diagnostics", {}),
+                }
+            except Exception as e:
+                logger.warning(f"symptom_products_api failed for '{ingr}': {e}")
+                return {
+                    "ingredient": ingr,
+                    "products": [],
+                    "us_warning_raw": None,
+                    "diagnostics": {"ingredient": ingr, "error": str(e)},
+                }
+
+    items = await asyncio.gather(*[fetch_one(ingr) for ingr in ingredients])
+
+    raw_warning_map = {
+        item["ingredient"]: item.get("us_warning_raw")
+        for item in items
+        if item.get("ingredient")
+    }
+    summarized_map = await AIService.bulk_summarize_fda_warnings(raw_warning_map)
+
+    for item in items:
+        ingredient = item.get("ingredient")
+        item["us_warning"] = summarized_map.get(ingredient) if ingredient else None
+        item.pop("us_warning_raw", None)
+
+    with_products = []
+    empty_products = []
+    for item in items:
+        ingredient = str(item.get("ingredient") or "")
+        products = item.get("products") or []
+        if products:
+            with_products.append(ingredient)
+        else:
+            empty_products.append(ingredient)
+
+    logger.warning(
+        "symptom_products_api summary: symptom='%s' requested=%d with_products=%d without_products=%d max_visible=5",
+        symptom,
+        len(ingredients),
+        len(with_products),
+        len(empty_products),
+    )
+    logger.warning(
+        "symptom_products_api requested ingredients: %s",
+        ", ".join(ingredients) if ingredients else "(none)",
+    )
+    logger.warning(
+        "symptom_products_api ingredients with products: %s",
+        ", ".join(with_products) if with_products else "(none)",
+    )
+    if empty_products:
+        logger.warning(
+            "symptom_products_api ingredients without products: %s",
+            ", ".join(empty_products),
+        )
+    if debug_mode:
+        diagnostics = [
+            {
+                "ingredient": item.get("ingredient"),
+                "product_count": len(item.get("products") or []),
+                "diagnostics": item.get("diagnostics", {}),
+            }
+            for item in items
+        ]
+        logger.warning(
+            "symptom_products_api diagnostics: %s",
+            json.dumps(diagnostics, ensure_ascii=False),
+        )
+
+    response_payload = {"status": "success", "items": items}
+    if debug_mode:
+        response_payload["diagnostics"] = [
+            {
+                "ingredient": item.get("ingredient"),
+                "product_count": len(item.get("products") or []),
+                "diagnostics": item.get("diagnostics", {}),
+            }
+            for item in items
+        ]
+    return JsonResponse(response_payload)

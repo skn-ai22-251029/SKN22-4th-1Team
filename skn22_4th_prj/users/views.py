@@ -1,12 +1,11 @@
 from django.shortcuts import render, redirect
 from services.supabase_service import SupabaseService
 from services.user_service import UserService
-import asyncio
 
 
 from django.http import JsonResponse
 
-def register_view(request):
+async def register_view(request):
     if request.method == "POST":
         email = request.POST.get("email")
         password = request.POST.get("password")
@@ -26,17 +25,14 @@ def register_view(request):
         # 알레르기 처리
         has_allergy = request.POST.get("has_allergy") == "on"
         allergies = request.POST.get("allergies", "") if has_allergy else ""
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            user, error = loop.run_until_complete(SupabaseService.auth_sign_up(email, password))
+            user, error = await SupabaseService.auth_sign_up(email, password)
             
             if user:
                 # 회원가입 성공 시 프로필 생성
-                loop.run_until_complete(SupabaseService.update_user_profile(
+                await SupabaseService.update_user_profile(
                     user.id, current_medications, allergies, chronic_diseases, is_pregnant
-                ))
+                )
                 return JsonResponse({"status": "success", "redirect": "/auth/login/"})
             else:
                 if error == "exists":
@@ -44,13 +40,11 @@ def register_view(request):
                 return JsonResponse({"status": "error", "message": f"회원가입 실패: {error}"}, status=400)
         except Exception as e:
              return JsonResponse({"status": "error", "message": f"시스템 오류: {str(e)}"}, status=500)
-        finally:
-            loop.close()
             
     return render(request, "register.html")
 
 
-def login_view(request):
+async def login_view(request):
     # 이미 로그인된 경우 메인으로 리다이렉트
     if "supabase_user" in request.session:
         return redirect("chat:home")
@@ -58,10 +52,7 @@ def login_view(request):
     if request.method == "POST":
         email = request.POST.get("email")
         password = request.POST.get("password")
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        user, session = loop.run_until_complete(SupabaseService.auth_sign_in(email, password))
+        user, session = await SupabaseService.auth_sign_in(email, password)
         
         if user and session:
             # 세션에 사용자 정보 저장

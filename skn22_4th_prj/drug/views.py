@@ -85,10 +85,14 @@ class UsRoadmapView(APIView):
         try:
             cached_data = await SupabaseService.get_roadmap_cache(cache_key)
             if cached_data:
+                mapping_result = cached_data.get("mapping_result", {})
+                mapping_result = await MapService.ensure_mapping_result_summaries(
+                    mapping_result
+                )
                 return Response(
                     {
                         "requested_ingredients": ingredients,
-                        "mapping_result": cached_data.get("mapping_result", {}),
+                        "mapping_result": mapping_result,
                         "pharmacist_card": cached_data.get("pharmacist_card", {}),
                         "dosage_warnings": cached_data.get("dosage_warnings", []),
                     }
@@ -98,6 +102,9 @@ class UsRoadmapView(APIView):
 
         try:
             mapping_result = await MapService.find_optimal_us_products(ingredients)
+            mapping_result = await MapService.ensure_mapping_result_summaries(
+                mapping_result
+            )
             pharmacist_card = MapService.generate_pharmacist_card(ingredients)
             dosage_warnings = []
 

@@ -16,6 +16,8 @@ class AgentState(TypedDict):
     # Intermediate fields for symptom pipeline
     all_ingredient_candidates: Optional[List[str]]
     ingredient_candidates: Optional[List[str]]
+    backup_ingredient_candidates: Optional[List[str]]
+    symptom_term: Optional[str]
     products_map: Optional[dict]
 
     # Caching fields
