@@ -164,6 +164,36 @@
       .product-list ul { list-style: none; }
       .product-list li { padding: 0.55rem 0; border-bottom: 1px solid #e5f1ec; }
       .product-list li:last-child { border-bottom: 0; }
+      .product-head { display: flex; gap: 0.6rem; align-items: flex-start; }
+      .product-thumb {
+        width: 48px;
+        height: 48px;
+        border-radius: 8px;
+        border: 1px solid #d5e8e1;
+        background: #fff;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+      .product-main { min-width: 0; }
+      .product-link-title { color: #143f38; text-decoration: none; }
+      .product-link-title:hover { text-decoration: underline; }
+      .product-links {
+        margin-top: 0.22rem;
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+      }
+      .product-links a {
+        font-size: 0.74rem;
+        font-weight: 700;
+        color: #1f5f53;
+        text-decoration: none;
+        border: 1px solid #bde3d7;
+        border-radius: 7px;
+        background: #fff;
+        padding: 0.08rem 0.35rem;
+      }
+      .product-links a:hover { text-decoration: underline; }
 
       body.dur-gate-locked { overflow: hidden; }
 
@@ -351,10 +381,32 @@
         const items = products
           .map((p) => {
             const name = escapeHtml(p.brand_name || "이름 없음");
-            const ingredient = escapeHtml(p.active_ingredient || "");
-            const purpose = escapeHtml(p.purpose || "설명 없음");
-            const ingredientText = ingredient && ingredient !== "Unknown" ? ` (${ingredient})` : "";
-            return `<li><strong>${name}${ingredientText}</strong><br /><span>${purpose}</span></li>`;
+            const manufacturer = escapeHtml(p.manufacturer_name || "Unknown Manufacturer");
+            const rankLabel = escapeHtml(p.amazon_rank_label || "");
+            const amazonUrl = escapeHtml(p.amazon_url || "");
+            const dailymedUrl = escapeHtml(p.dailymed_url || "");
+            const imageUrl = escapeHtml(p.amazon_image_url || "");
+            const summaryKr = escapeHtml(
+              p.summary_kr || "효능 요약 정보를 불러오지 못했습니다. 복용 전 용법·용량과 주의사항을 확인하세요."
+            );
+            const rankHtml = rankLabel ? `<br /><span>Amazon BSR: ${rankLabel}</span>` : "";
+            const titleUrl = amazonUrl || dailymedUrl;
+            const titleHtml = titleUrl
+              ? `<strong><a class="product-link-title" href="${titleUrl}" target="_blank" rel="noopener noreferrer">${name}</a></strong>`
+              : `<strong>${name}</strong>`;
+            const imageHtml = imageUrl
+              ? `<img class="product-thumb" src="${imageUrl}" alt="${name} image" loading="lazy" />`
+              : "";
+            const links = [
+              amazonUrl
+                ? `<a href="${amazonUrl}" target="_blank" rel="noopener noreferrer">아마존 상세</a>`
+                : "",
+              dailymedUrl
+                ? `<a href="${dailymedUrl}" target="_blank" rel="noopener noreferrer">DailyMed 정보</a>`
+                : "",
+            ].filter(Boolean).join("");
+            const linksHtml = links ? `<div class="product-links">${links}</div>` : "";
+            return `<li><div class="product-head">${imageHtml}<div class="product-main">${titleHtml}<br /><span>Manufacturer: ${manufacturer}</span>${linksHtml}</div></div>${rankHtml}<br /><span>${summaryKr}</span></li>`;
           })
           .join("");
 

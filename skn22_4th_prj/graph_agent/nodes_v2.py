@@ -14,8 +14,60 @@ from services.ingredient_utils import (
 logger = logging.getLogger(__name__)
 
 
+SYMPTOM_TO_FDA_TERMS = {
+    "두통": ["headache", "pain relief"],
+    "편두통": ["migraine", "headache"],
+    "알레르기": ["allergy", "allergic reaction", "antihistamine"],
+    "기침": ["cough", "cold", "nasal congestion", "sinus congestion"],
+    "감기": ["cold"],
+    "발열": ["fever"],
+    "소화불량": ["indigestion"],
+    "복통": ["stomachache", "abdominal pain"],
+    "염좌": ["sprain"],
+    "찰과상": ["wound", "skin abrasion"],
+    "화상": ["burn"],
+    "곤충교상": ["insect bite"],
+}
+
+
+def _to_fda_symptom_terms(symptom_term: str):
+    token = str(symptom_term or "").strip().lower()
+    if not token:
+        return []
+    return SYMPTOM_TO_FDA_TERMS.get(token, [])
+
+
+def _merge_unique_terms(*groups):
+    merged = []
+    seen = set()
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for value in group:
+            token = str(value or "").strip().lower()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            merged.append(token)
+    return merged
+
+
+def _has_user_risk_profile(user_profile):
+    if not isinstance(user_profile, dict):
+        return False
+
+    for key in ("current_medications", "allergies", "chronic_diseases"):
+        value = str(user_profile.get(key) or "").strip().lower()
+        if value and value not in {"none", "없음", "없어요", "n/a", "na", "x"}:
+            return True
+    return False
+
+
 def _normalize_ai_ingredients(ai_ingredients, dur_data):
-    """Validate and normalize AI ingredient list against DUR ingredient candidates."""
+    """Build stable output entries from preselected DUR ingredients.
+
+    Ingredient validity is decided upstream. Here we only normalize output fields.
+    """
     if not isinstance(dur_data, list):
         return []
 
@@ -56,13 +108,13 @@ def _normalize_ai_ingredients(ai_ingredients, dur_data):
                 "dur_warning_types": [str(x) for x in warning_types if isinstance(x, str)],
             }
 
-    # Fill missing ingredients conservatively to avoid silent omissions.
+    # Fill missing ingredients with neutral defaults to keep output stable.
     for name in ordered_names:
         if name not in normalized_map:
             normalized_map[name] = {
                 "name": name,
-                "can_take": False,
-                "reason": "AI 응답에서 누락되어 보수적으로 주의 성분으로 분류했습니다.",
+                "can_take": True,
+                "reason": "개별 복용 판정 정보가 일부 누락되어 일반 주의 안내를 제공합니다.",
                 "dur_warning_types": [],
             }
 
@@ -76,33 +128,20 @@ async def classify_node(state: AgentState) -> AgentState:
 
     category = intent.get("category", "invalid")
     keyword = intent.get("keyword", "")
-    cache_key = intent.get("cache_key")
-    is_cached = False
-    cached_payload = {}
+    query_l = str(query or "").strip().lower()
 
-    if category == "symptom_recommendation":
-        if not cache_key:
-            cache_key = await AIService.normalize_symptom_query(query)
-        try:
-            cached = await SupabaseService.get_symptom_cache(cache_key)
-            if cached:
-                is_cached = True
-                cached_payload = {
-                    "final_answer": cached.get("final_answer", ""),
-                    "fda_data": cached.get("fda_data") or [],
-                    "dur_data": cached.get("dur_data") or [],
-                    "ingredients_data": cached.get("ingredients_data") or [],
-                }
-        except Exception as e:
-            logger.warning(f"Symptom cache lookup failed for key '{cache_key}': {e}")
+    # Heuristic safeguard: allergy-like symptom queries must stay on symptom path.
+    if any(token in query_l for token in ["알레르기", "allergy", "allergic"]):
+        category = "symptom_recommendation"
+        if not keyword or keyword == "none":
+            keyword = "알레르기"
 
     return {
         "category": category,
         "keyword": keyword,
         "symptom": query if category == "symptom_recommendation" else None,
-        "cache_key": cache_key,
-        "is_cached": is_cached,
-        **cached_payload,
+        "cache_key": None,
+        "is_cached": False,
     }
 
 
@@ -131,34 +170,33 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
                 logger.error(f"Error fetching user profile from Supabase: {e}")
 
     if category == "symptom_recommendation":
+        db_symptom_term = await AIService.canonicalize_symptom_term(
+            query=query,
+            hint_keyword=keyword,
+        )
+        db_symptom_term = (db_symptom_term or keyword or query).strip()
+
         ranked_ingredients = await SupabaseService.search_ingredient_scores_by_symptom(
-            keyword=keyword,
+            keyword=db_symptom_term,
             raw_query=query,
             max_rows=5000,
         )
         all_ingredients = [item["ingredient"] for item in ranked_ingredients]
-
-        if not all_ingredients:
-            logger.info(
-                f"DB symptom search returned no ingredients for '{keyword}'. "
-                "Falling back to FDA symptom ingredient search."
-            )
-            eng_kw = [keyword] if keyword and keyword != "none" else ["pain"]
-            all_ingredients = await DrugService.get_ingrs_from_fda_by_symptoms(eng_kw)
-
-            if not all_ingredients:
-                synonyms = await AIService.get_symptom_synonyms(keyword or query)
-                if synonyms:
-                    all_ingredients = await DrugService.get_ingrs_from_fda_by_symptoms(
-                        synonyms
-                    )
-
-            if not all_ingredients:
-                all_ingredients = await AIService.recommend_ingredients_for_symptom(
-                    keyword or query
-                )
-
-        all_ingredients = canonicalize_ingredient_list(all_ingredients)
+        eng_kw = _to_fda_symptom_terms(db_symptom_term)
+        if not eng_kw:
+            eng_kw = _to_fda_symptom_terms(keyword)
+        if not eng_kw:
+            eng_kw = ["pain"]
+        synonyms = await AIService.get_symptom_synonyms(keyword or query)
+        search_terms = _merge_unique_terms(eng_kw, synonyms)
+        logger.info(
+            "FDA symptom ingredient terms: %s",
+            ", ".join(search_terms),
+        )
+        fda_candidates = await DrugService.get_ingrs_from_fda_by_symptoms(
+            search_terms
+        )
+        fda_candidates = canonicalize_ingredient_list(fda_candidates)
 
         if ranked_ingredients:
             merged_scores = {}
@@ -172,25 +210,89 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
                 for name, score in sorted(merged_scores.items(), key=lambda x: (-x[1], x[0]))
             ]
         else:
-            scored_candidates = [{"ingredient": name, "score": 0} for name in all_ingredients]
+            scored_candidates = []
 
-        fda_ingredients = await AIService.select_direct_symptom_ingredients(
-            symptom=keyword or query,
-            candidates=scored_candidates,
-            top_n=5,
-        )
-        fda_ingredients = canonicalize_ingredient_list(fda_ingredients)[:5]
-        if not fda_ingredients:
-            fda_ingredients = all_ingredients[:5]
+        # Primary source of truth:
+        # unified_drug_info.efficacy matches symptom -> extract ingredients from main_ingr_eng.
+        # Then reduce noisy combo ingredients by selecting symptom-direct top ingredients.
+        selected_ingredients = []
+        if scored_candidates:
+            selected_ingredients = await AIService.select_direct_symptom_ingredients(
+                symptom=db_symptom_term or query,
+                candidates=scored_candidates,
+                top_n=10,
+            )
+            selected_ingredients = canonicalize_ingredient_list(selected_ingredients)[:10]
+            if not selected_ingredients:
+                selected_ingredients = [
+                    item["ingredient"]
+                    for item in scored_candidates
+                    if item.get("ingredient")
+                ][:10]
+            if selected_ingredients and fda_candidates:
+                selected_ingredients = canonicalize_ingredient_list(
+                    selected_ingredients
+                )[:10]
+                overlap = set(selected_ingredients).intersection(set(fda_candidates))
+                fda_unique = [ingr for ingr in fda_candidates if ingr not in selected_ingredients]
+                supplement_slots = min(3, len(fda_unique))
+                if supplement_slots > 0:
+                    db_keep = max(10 - supplement_slots, 0)
+                    merged_selected = selected_ingredients[:db_keep] + fda_unique[:supplement_slots]
+                    for token in selected_ingredients[db_keep:]:
+                        if token not in merged_selected:
+                            merged_selected.append(token)
+                    for token in fda_unique[supplement_slots:]:
+                        if token not in merged_selected:
+                            merged_selected.append(token)
+                    selected_ingredients = canonicalize_ingredient_list(merged_selected)[:10]
+                    logger.info(
+                        "Symptom candidate supplementation applied: overlap=%d supplemented=%d",
+                        len(overlap),
+                        supplement_slots,
+                    )
+
+        if not selected_ingredients:
+            logger.info(
+                f"DB symptom search returned no ingredients for '{db_symptom_term}'. "
+                "Falling back to FDA symptom ingredient search."
+            )
+            all_ingredients = list(fda_candidates)
+
+            if not all_ingredients:
+                all_ingredients = await AIService.recommend_ingredients_for_symptom(
+                    keyword or query
+                )
+
+            all_ingredients = canonicalize_ingredient_list(all_ingredients)
+            selected_ingredients = all_ingredients[:10]
+        else:
+            all_ingredients = canonicalize_ingredient_list(
+                [item["ingredient"] for item in scored_candidates] + list(fda_candidates)
+            )
+
+        fda_ingredients = selected_ingredients[:5]
+        backup_ingredients = selected_ingredients[5:10]
 
         logger.info(
-            f"Symptom '{keyword}' ingredients extracted={len(all_ingredients)}, "
-            f"FDA targets={len(fda_ingredients)}"
+            f"Symptom raw='{query}', db_term='{db_symptom_term}', keyword='{keyword}' "
+            f"ingredients extracted={len(all_ingredients)}, "
+            f"primary_targets={len(fda_ingredients)}, backup_targets={len(backup_ingredients)}"
+        )
+        logger.info(
+            "Symptom selected ingredients (top10): %s",
+            ", ".join(selected_ingredients) if selected_ingredients else "(none)",
+        )
+        logger.info(
+            "Symptom FDA candidates (top10): %s",
+            ", ".join(fda_candidates[:10]) if fda_candidates else "(none)",
         )
 
         return {
             "all_ingredient_candidates": all_ingredients,
-            "ingredient_candidates": fda_ingredients,
+            "ingredient_candidates": selected_ingredients,
+            "backup_ingredient_candidates": backup_ingredients,
+            "symptom_term": db_symptom_term,
             "fda_data": fda_ingredients,
             "user_profile": user_profile_data,
         }
@@ -207,24 +309,8 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
 
 
 async def retrieve_fda_products_node(state: AgentState) -> AgentState:
-    """FDA product name search based on extracted ingredients."""
-    if state["category"] != "symptom_recommendation":
-        return {}
-
-    ingredients = state.get("ingredient_candidates") or []
-    if not ingredients:
-        return {"products_map": {}}
-
-    async def fetch_products(ingr_name: str):
-        try:
-            result = await MapService.get_us_otc_products_by_ingredient(ingr_name)
-            return ingr_name.upper(), result.get("products", [])
-        except Exception as e:
-            logger.warning(f"Failed to fetch products for '{ingr_name}': {e}")
-            return ingr_name.upper(), []
-
-    product_results = await asyncio.gather(*[fetch_products(n) for n in ingredients])
-    return {"products_map": dict(product_results)}
+    # Deprecated path: product lookup moved to answer_symptom for can_take=true ingredients only.
+    return {"products_map": {}}
 
 
 async def retrieve_dur_node(state: AgentState) -> AgentState:
@@ -235,7 +321,9 @@ async def retrieve_dur_node(state: AgentState) -> AgentState:
         ingredients = state.get("ingredient_candidates") or []
         if not ingredients:
             return {"dur_data": []}
-        dur_data = await DrugService.get_enriched_dur_info(ingredients)
+        # Initial response: KR DUR only.
+        # US warning and product details are loaded asynchronously from a follow-up API.
+        dur_data = await DrugService.get_kr_dur_info(ingredients)
         return {"dur_data": dur_data}
 
     if category == "product_request":
@@ -254,15 +342,7 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
     symptom = state["symptom"]
     dur_data = state.get("dur_data") or []
     fda_data = state.get("fda_data", [])
-    products_map = state.get("products_map") or {}
-
-    if state.get("is_cached", False):
-        return {
-            "final_answer": state.get("final_answer", ""),
-            "dur_data": dur_data,
-            "fda_data": fda_data,
-            "ingredients_data": state.get("ingredients_data", []),
-        }
+    products_map = {}
 
     if not dur_data:
         fallback_query = (
@@ -278,10 +358,8 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
         symptom, dur_data, state.get("user_profile")
     )
 
-    is_invalid_payload = not isinstance(ai_result, dict) or not isinstance(
-        ai_result.get("ingredients"), list
-    )
-    if is_invalid_payload:
+    should_retry = not isinstance(ai_result, dict) or ("ingredients" not in ai_result)
+    if should_retry:
         retry_result = await AIService.generate_symptom_answer(
             symptom, dur_data, state.get("user_profile")
         )
@@ -300,34 +378,49 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
         summary = "요청 증상에 대해 성분별 안전성과 주의사항을 정리했습니다."
     ai_ingredients = _normalize_ai_ingredients(ai_result.get("ingredients", []), dur_data)
 
+    # Policy: without user risk profile, do not classify ingredients as "cannot take".
+    # can_take=false is only allowed when there is user-specific risk information to evaluate.
+    has_user_risk = _has_user_risk_profile(state.get("user_profile"))
+    if not has_user_risk:
+        for ing in ai_ingredients:
+            ing["can_take"] = True
+            reason = str(ing.get("reason") or "").strip()
+            if not reason:
+                ing["reason"] = "개인 건강정보(복용약/알레르기/기저질환) 미입력 상태로 일반 복용 가능 기준으로 안내합니다."
+
     dur_map = {item["ingredient"].upper(): item for item in dur_data}
+    ai_map = {}
+    for ing in ai_ingredients:
+        name = str(ing.get("name") or "").strip().upper()
+        if not name:
+            continue
+        ai_map[name] = ing
+
+    # Keep rendering order aligned with DB-ranked ingredients (1~10).
+    # This guarantees initial UI shows rank 1~5 first, then 6~10 as replacement pool.
+    ranked_ingredients = state.get("ingredient_candidates") or []
+    ordered_names = [str(x).strip().upper() for x in ranked_ingredients if str(x).strip()]
+    if not ordered_names:
+        ordered_names = [str(item.get("ingredient") or "").strip().upper() for item in dur_data]
+        ordered_names = [x for x in ordered_names if x]
 
     ingredients_data = []
-    for ing in ai_ingredients:
-        name = ing.get("name", "").upper()
+    for name in ordered_names:
         dur_item = dur_map.get(name, {})
+        ai_item = ai_map.get(name, {})
+        reason = str(ai_item.get("reason") or "").strip()
+        if not reason:
+            reason = "개인 건강정보(복용약/알레르기/기저질환) 미입력 상태로 일반 복용 가능 기준으로 안내합니다."
         entry = {
             "name": name,
-            "can_take": ing.get("can_take", True),
-            "reason": ing.get("reason", ""),
-            "dur_warning_types": ing.get("dur_warning_types", []),
+            "can_take": ai_item.get("can_take", True),
+            "reason": reason,
+            "dur_warning_types": ai_item.get("dur_warning_types", []),
             "kr_durs": dur_item.get("kr_durs", []),
             "fda_warning": dur_item.get("fda_warning", None),
-            "products": products_map.get(name, []) if ing.get("can_take", False) else [],
+            "products": products_map.get(name, []),
         }
         ingredients_data.append(entry)
-
-    try:
-        await SupabaseService.set_symptom_cache(
-            query_text=state.get("cache_key") or state.get("query", ""),
-            category="symptom_recommendation",
-            fda_data=fda_data if isinstance(fda_data, list) else [],
-            dur_data=dur_data,
-            final_answer=summary,
-            recommended_ingredients=[x.get("name") for x in ingredients_data if x.get("name")],
-        )
-    except Exception as e:
-        logger.warning(f"Failed to save symptom cache: {e}")
 
     return {
         "final_answer": summary,

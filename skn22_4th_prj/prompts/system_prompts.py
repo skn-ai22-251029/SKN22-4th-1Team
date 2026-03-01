@@ -55,15 +55,15 @@ Analyze the user's question and determine the appropriate search strategy.
 - "general_medical": 약과 증상이 없는 일반 의학 지식 질문 (e.g., 항생제 내성이란?)
 
 [Keyword Extraction Rules]
-1. Extract the most specific English medical search term.
+1. Extract the most specific Korean medical term for symptom search.
 2. For drug names, preserve the exact English spelling.
-3. For Korean symptom words, translate to English medical terms (e.g., 두통 → headache, 소화불량 → indigestion).
+3. For Korean symptom words, normalize to Korean clinical terms (e.g., "머리 아파" -> "두통", "소화 안 돼" -> "소화불량", "편두통" -> "편두통").
 4. For situational/injury descriptions, extract the medical condition:
-   - 다리가 까졌다/키다 → "wound" or "skin abrasion"
-   - 벤에 스쳨림 → "sprain"
-   - 화상 → "burn"
-   - 모기에 물렸다 → "insect bite"
-   - 눈이 말겁겉하다 → "dry eye"
+   - 다리가 까졌다/긁혔다 → "찰과상" 또는 "상처"
+   - 발목을 삐었다 → "염좌"
+   - 화상 → "화상"
+   - 모기에 물렸다 → "곤충교상"
+   - 눈이 뻑뻑하다 → "안구건조"
 5. For "general_medical", set keyword to "none" or null.
 
 [Invalid/Unrelated Query Handling]
@@ -82,17 +82,18 @@ Do NOT attempt to force-fit the input into a category or hallucinate information
 Return ONLY a JSON object with no additional text:
 {{
   "category": "symptom_recommendation|product_request|general_medical|invalid",
-  "keyword": "search term in English or 'none'",
+  "keyword": "symptom: Korean medical term / product: original product term / or 'none'",
   "cache_key": "normalized_key_for_caching (e.g., headache_severe_splitting)"
 }}
 
 Examples:
 - "타이레놀의 효능은?" -> {{"category": "product_request", "keyword": "Tylenol", "cache_key": "product_tylenol"}}
-- "두통에 좋은 약" -> {{"category": "symptom_recommendation", "keyword": "headache", "cache_key": "headache_moderate_none"}}
-- "넘어져서 다리가 까졌어" -> {{"category": "symptom_recommendation", "keyword": "wound", "cache_key": "wound_skin_abrasion"}}
-- "모기에 물렸는데 너무 가려워" -> {{"category": "symptom_recommendation", "keyword": "insect bite", "cache_key": "insect_bite_itch"}}
-- "화상 입었는데 무슨 약 바르면 돼?" -> {{"category": "symptom_recommendation", "keyword": "burn", "cache_key": "burn_skin_moderate"}}
-- "발목을 삐었어" -> {{"category": "symptom_recommendation", "keyword": "sprain", "cache_key": "ankle_sprain_moderate"}}
+- "두통에 좋은 약" -> {{"category": "symptom_recommendation", "keyword": "두통", "cache_key": "headache_moderate_none"}}
+- "편두통이 있어" -> {{"category": "symptom_recommendation", "keyword": "편두통", "cache_key": "migraine_moderate_none"}}
+- "넘어져서 다리가 까졌어" -> {{"category": "symptom_recommendation", "keyword": "찰과상", "cache_key": "wound_skin_abrasion"}}
+- "모기에 물렸는데 너무 가려워" -> {{"category": "symptom_recommendation", "keyword": "곤충교상", "cache_key": "insect_bite_itch"}}
+- "화상 입었는데 무슨 약 바르면 돼?" -> {{"category": "symptom_recommendation", "keyword": "화상", "cache_key": "burn_skin_moderate"}}
+- "발목을 삐었어" -> {{"category": "symptom_recommendation", "keyword": "염좌", "cache_key": "ankle_sprain_moderate"}}
 - "항생제 내성이 뭐야?" -> {{"category": "general_medical", "keyword": "none", "cache_key": "general_antibiotic_resistance"}}
 - "아아아아아" -> {{"category": "invalid", "keyword": "none", "cache_key": "invalid"}}
 

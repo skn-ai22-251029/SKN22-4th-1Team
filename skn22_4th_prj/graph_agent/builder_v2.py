@@ -76,14 +76,11 @@ def build_graph():
         "retrieve_data",
         route_after_retrieve_data,
         {
-            "symptom": "retrieve_fda_products",
+            "symptom": "retrieve_dur",
             "product": "retrieve_dur",
             "error": "answer_error",
         },
     )
-
-    # Symptom: FDA product lookup -> DUR
-    workflow.add_edge("retrieve_fda_products", "retrieve_dur")
 
     # Final routing after DUR
     def route_after_retrieve_dur(state: AgentState):

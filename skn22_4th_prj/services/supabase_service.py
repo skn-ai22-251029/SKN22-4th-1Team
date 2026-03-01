@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import asyncio
 from supabase import create_client, Client
 
 from services.ai_service_v2 import AIService
@@ -11,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 class SupabaseService:
     _client = None
+
+    @staticmethod
+    async def _run_io(func):
+        """Run blocking Supabase SDK calls in a worker thread."""
+        return await asyncio.to_thread(func)
 
     @classmethod
     def get_client(cls) -> Client:
@@ -31,7 +37,9 @@ class SupabaseService:
     async def auth_sign_up(cls, email, password):
         client = cls.get_client()
         try:
-            response = client.auth.sign_up({"email": email, "password": password})
+            response = await cls._run_io(
+                lambda: client.auth.sign_up({"email": email, "password": password})
+            )
             return response.user, None
         except Exception as e:
             error_msg = str(e)
@@ -44,8 +52,10 @@ class SupabaseService:
     async def auth_sign_in(cls, email, password):
         client = cls.get_client()
         try:
-            response = client.auth.sign_in_with_password(
-                {"email": email, "password": password}
+            response = await cls._run_io(
+                lambda: client.auth.sign_in_with_password(
+                    {"email": email, "password": password}
+                )
             )
             return response.user, response.session
         except Exception as e:
@@ -56,7 +66,9 @@ class SupabaseService:
     async def auth_update_password(cls, new_password):
         client = cls.get_client()
         try:
-            response = client.auth.update_user({"password": new_password})
+            response = await cls._run_io(
+                lambda: client.auth.update_user({"password": new_password})
+            )
             return response.user, None
         except Exception as e:
             logger.error(f"[Supabase Auth] Password update error: {e}")
@@ -70,8 +82,8 @@ class SupabaseService:
             return False, "Supabase credentials are not configured."
         try:
             # Use a fresh client to avoid stale auth state after admin operations.
-            fresh_client = create_client(url, key)
-            fresh_client.auth.admin.delete_user(str(user_id))
+            fresh_client = await cls._run_io(lambda: create_client(url, key))
+            await cls._run_io(lambda: fresh_client.auth.admin.delete_user(str(user_id)))
             cls._client = None
             return True, None
         except Exception as e:
@@ -91,11 +103,18 @@ class SupabaseService:
 
         results = []
         for d in dur_data:
+            dur_type = d.get("dur_type")
+            type_name = d.get("type_name") or dur_type
+            mixture_ingr = (d.get("mixture_ingr_eng_name") or "").strip()
+            warning_msg = d.get("prohbt_content") or d.get("remark")
+            if dur_type == "COMBINED" and mixture_ingr:
+                warning_msg = f"병용금기 성분: {mixture_ingr}"
+
             results.append(
                 {
-                    "type": d.get("dur_type"),
+                    "type": type_name,
                     "ingr_name": d.get("ingr_kor_name"),
-                    "warning_msg": d.get("prohbt_content") or d.get("remark"),
+                    "warning_msg": warning_msg,
                     "severity": d.get("critical_value"),
                 }
             )
@@ -130,7 +149,7 @@ class SupabaseService:
         if not ingr_name:
             return []
 
-        target_name = ingr_name.strip()
+        target_name = canonicalize_ingredient_name(ingr_name.strip()) or ingr_name.strip()
         if not target_name:
             return []
 
@@ -140,58 +159,55 @@ class SupabaseService:
 
         dur_list = []
         try:
-            is_korean = bool(re.search("[가-힣]", target_name))
-            if is_korean:
-                response = (
+            # 1) prefix match first (faster/saner), 2) broad contains fallback
+            response = await cls._run_io(
+                lambda: (
                     client.table("dur_master")
-                    .select("*")
-                    .ilike("ingr_kor_name", f"%{target_name}%")
+                    .select(
+                        "dur_type,type_name,ingr_kor_name,prohbt_content,remark,mixture_ingr_eng_name"
+                    )
+                    .ilike("ingr_eng_name", f"{target_name.lower()}%")
                     .execute()
                 )
-            else:
-                response = (
-                    client.table("dur_master")
-                    .select("*")
-                    .ilike("ingr_eng_name", f"%{target_name.lower()}%")
-                    .execute()
+            )
+            dur_list = response.data or []
+
+            if not dur_list:
+                response = await cls._run_io(
+                    lambda: (
+                        client.table("dur_master")
+                        .select(
+                            "dur_type,type_name,ingr_kor_name,prohbt_content,remark,mixture_ingr_eng_name"
+                        )
+                        .ilike("ingr_eng_name", f"%{target_name.lower()}%")
+                        .execute()
+                    )
                 )
-            dur_list = response.data
+                dur_list = response.data or []
         except Exception as e:
             logger.error(f"[Supabase] DUR query error for '{target_name}': {e}")
             return []
 
-        dur_type_kor_map = {
-            "PREGNANCY": "임부 금기/주의",
-            "COMBINED": "병용 금기",
-            "AGE_SPECIFIC": "연령 금기",
-            "ELDERLY": "노인 주의",
-            "MAX_CAPACITY": "용량 주의",
-            "MAX_DURATION": "투여 기간 주의",
-            "EFFICACY_DUPLICATE": "효능 중복 주의",
-            "DOSAGE_DUPLICATE": "용법 주의",
-            "ADMINISTRATION_DUPLICATE": "투여 경로 주의",
-            "LACTATION": "수유부 주의",
-            "WEIGHT": "체중 주의",
-            "KIDNEY": "신장 질환 주의",
-            "LIVER": "간 질환 주의",
-            "G6PD": "특정 효소 결핍 주의",
-            "PEDIATRIC": "소아 주의",
-        }
-
         grouped_results = {}
         for d in dur_list:
-            kor_type = dur_type_kor_map.get(d.get("dur_type"), d.get("dur_type"))
-            content = (d.get("prohbt_content") or d.get("remark") or "").strip()
-            if not content:
+            dur_type = d.get("dur_type")
+            type_name = str(d.get("type_name") or dur_type or "").strip()
+            if not type_name:
                 continue
 
-            if kor_type not in grouped_results:
-                grouped_results[kor_type] = {
-                    "type": kor_type,
+            mixture_ingr = (d.get("mixture_ingr_eng_name") or "").strip()
+            if dur_type == "COMBINED" and mixture_ingr:
+                content = f"병용금기 성분: {mixture_ingr}"
+            else:
+                content = f"{type_name} 금기 사항이 있을 수 있습니다. 의사/약사와 상담 후 복용하세요."
+
+            if type_name not in grouped_results:
+                grouped_results[type_name] = {
+                    "type": type_name,
                     "kor_name": d.get("ingr_kor_name"),
                     "warnings": set(),
                 }
-            grouped_results[kor_type]["warnings"].add(content)
+            grouped_results[type_name]["warnings"].add(content)
 
         results = []
         for val in grouped_results.values():
@@ -215,24 +231,37 @@ class SupabaseService:
         for ingr in ingr_list:
             if not ingr:
                 continue
-            target = ingr.strip()
+            target = canonicalize_ingredient_name(ingr.strip()) or ingr.strip()
             try:
-                if bool(re.search("[가-힣]", target)):
-                    response = (
+                # 1) prefix match first
+                response = await cls._run_io(
+                    lambda: (
                         client.table("dur_master")
-                        .select("*")
-                        .ilike("ingr_kor_name", f"%{target}%")
+                        .select(
+                            "dur_type,type_name,ingr_kor_name,critical_value,prohbt_content,remark,mixture_ingr_eng_name"
+                        )
+                        .ilike("ingr_eng_name", f"{target.lower()}%")
                         .execute()
                     )
-                else:
-                    response = (
-                        client.table("dur_master")
-                        .select("*")
-                        .ilike("ingr_eng_name", f"%{target.lower()}%")
-                        .execute()
+                )
+                rows = response.data or []
+
+                # 2) contains fallback
+                if not rows:
+                    response = await cls._run_io(
+                        lambda: (
+                            client.table("dur_master")
+                            .select(
+                                "dur_type,type_name,ingr_kor_name,critical_value,prohbt_content,remark,mixture_ingr_eng_name"
+                            )
+                            .ilike("ingr_eng_name", f"%{target.lower()}%")
+                            .execute()
+                        )
                     )
-                if response.data:
-                    all_results.extend(response.data)
+                    rows = response.data or []
+
+                if rows:
+                    all_results.extend(rows)
             except Exception as e:
                 logger.error(f"[Supabase] Batch DUR query error for '{target}': {e}")
 
@@ -245,12 +274,14 @@ class SupabaseService:
             return None
 
         try:
-            response = (
+            response = await cls._run_io(
+                lambda: (
                 client.table("search_cache")
                 .select("*")
                 .eq("query_text", query_text)
                 .limit(1)
                 .execute()
+                )
             )
             if response.data:
                 return response.data[0]
@@ -283,9 +314,11 @@ class SupabaseService:
                     recommended_ingredients if recommended_ingredients else []
                 ),
             }
-            client.table("search_cache").upsert(
-                payload, on_conflict="query_text"
-            ).execute()
+            await cls._run_io(
+                lambda: client.table("search_cache")
+                .upsert(payload, on_conflict="query_text")
+                .execute()
+            )
             return True
         except Exception as e:
             logger.error(f"[Cache] Error saving cache for '{query_text}': {e}")
@@ -319,12 +352,14 @@ class SupabaseService:
         while start < max_rows:
             end = min(start + batch_size - 1, max_rows - 1)
             try:
-                response = (
+                response = await cls._run_io(
+                    lambda: (
                     client.table("unified_drug_info")
                     .select("main_ingr_eng, efficacy")
                     .ilike("efficacy", f"%{symptom_term}%")
                     .range(start, end)
                     .execute()
+                    )
                 )
                 batch = response.data or []
             except Exception as e:
@@ -409,12 +444,14 @@ class SupabaseService:
             return []
 
         try:
-            response = (
+            response = await cls._run_io(
+                lambda: (
                 client.table("unified_drug_info")
                 .select("item_name, entp_name")
                 .or_(f"item_name.ilike.%{query_text}%,entp_name.ilike.%{query_text}%")
                 .limit(limit)
                 .execute()
+                )
             )
             return response.data
         except Exception as e:
@@ -428,12 +465,14 @@ class SupabaseService:
             return None
 
         try:
-            response = (
+            response = await cls._run_io(
+                lambda: (
                 client.table("user_profile")
                 .select("*")
                 .eq("user_id", user_id)
                 .limit(1)
                 .execute()
+                )
             )
             if response.data:
                 return response.data[0]
@@ -462,8 +501,8 @@ class SupabaseService:
                 "chronic_diseases": chronic_diseases,
                 "is_pregnant": is_pregnant,
             }
-            response = (
-                client.table("user_profile")
+            response = await cls._run_io(
+                lambda: client.table("user_profile")
                 .upsert(payload, on_conflict="user_id")
                 .execute()
             )
@@ -479,7 +518,12 @@ class SupabaseService:
             return False
 
         try:
-            client.table("user_profile").delete().eq("user_id", str(user_id)).execute()
+            await cls._run_io(
+                lambda: client.table("user_profile")
+                .delete()
+                .eq("user_id", str(user_id))
+                .execute()
+            )
             return True
         except Exception as e:
             logger.error(f"[Supabase] Profile delete error for user {user_id}: {e}")

@@ -29,6 +29,7 @@ SUFFIX_MODIFIERS = {
     "MAGNESIUM",
     "ZINC",
     "HCL",
+    "HBR",
     "HYDROCHLORIDE",
     "HYDROBROMIDE",
     "PHOSPHATE",
