@@ -216,7 +216,7 @@ def _normalize_ai_ingredients(ai_ingredients, dur_data):
             normalized_map[name] = {
                 "name": name,
                 "can_take": True,
-                "reason": "媛쒕퀎 蹂듭슜 ?먯젙 ?뺣낫媛 ?쇰? ?꾨씫?섏뼱 ?쇰컲 二쇱쓽 ?덈궡瑜??쒓났?⑸땲??",
+                "reason": "개별 복용 판정 정보가 없어 일반 주의 안내를 제공합니다.",
                 "dur_warning_types": [],
             }
 
@@ -233,10 +233,10 @@ async def classify_node(state: AgentState) -> AgentState:
     query_l = str(query or "").strip().lower()
 
     # Heuristic safeguard: allergy-like symptom queries must stay on symptom path.
-    if any(token in query_l for token in ["?뚮젅瑜닿린", "allergy", "allergic"]):
+    if any(token in query_l for token in ["알레르기", "allergy", "allergic"]):
         category = "symptom_recommendation"
         if not keyword or keyword == "none":
-            keyword = "?뚮젅瑜닿린"
+            keyword = "알레르기"
 
     return {
         "category": category,
@@ -273,11 +273,11 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
                     food_allergy_detail = (
                         str(getattr(profile, "food_allergy_detail", "") or "").strip()
                     )
-                    if food_allergy_detail and "?곸꽭?뺣낫:" not in str(applied_allergies or ""):
+                    if food_allergy_detail and "상세정보:" not in str(applied_allergies or ""):
                         applied_allergies = (
-                            f"{applied_allergies} | ?곸꽭?뺣낫: {food_allergy_detail}"
+                            f"{applied_allergies} | 상세정보: {food_allergy_detail}"
                             if applied_allergies
-                            else f"?곸꽭?뺣낫: {food_allergy_detail}"
+                            else f"상세정보: {food_allergy_detail}"
                         )
                     user_profile_data = {
                         "current_medications": profile.current_medications,
@@ -469,7 +469,7 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
             f"(User query: {state['query']})"
         )
         answer = await AIService.generate_general_answer(fallback_query)
-        prefix = "?대떦 利앹긽?????DB/FDA/DUR 湲곕컲 ?뺣낫瑜?李얘린 ?대젮???쇰컲 媛?대뱶瑜??쒓났?⑸땲??\n\n"
+        prefix = "해당 증상에 대한 DB/FDA/DUR 기반 정보를 찾기 어려워 일반 가이드를 제공합니다.\n\n"
         return {"final_answer": prefix + answer, "ingredients_data": []}
 
     ai_result = await AIService.generate_symptom_answer(
@@ -493,7 +493,7 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
 
     summary = ai_result.get("summary", "")
     if not isinstance(summary, str) or not summary.strip():
-        summary = "?붿껌 利앹긽??????깅텇蹂??덉쟾?깃낵 二쇱쓽?ы빆???뺣━?덉뒿?덈떎."
+        summary = "요청 증상 관련 성분 안전성과 주의사항을 정리했습니다."
     ai_ingredients = _normalize_ai_ingredients(ai_result.get("ingredients", []), dur_data)
 
     # Policy: without user risk profile, do not classify ingredients as "cannot take".
@@ -574,12 +574,12 @@ async def generate_product_answer_node(state: AgentState) -> AgentState:
     dur_data = state.get("dur_data") or []
 
     if not fda_data:
-        return {"final_answer": "?대떦 ?섏빟???뺣낫瑜?李얠쓣 ???놁뒿?덈떎."}
+        return {"final_answer": "해당 의약품 정보를 찾을 수 없습니다."}
 
     brand_name = fda_data.get("brand_name")
     indications = fda_data.get("indications")
 
-    answer = f"**{brand_name}** ?뺣낫?낅땲??\n\n**?⑤뒫/?④낵**:\n{indications}\n\n**DUR/二쇱쓽?ы빆**:\n"
+    answer = f"**{brand_name}** 정보입니다.\n\n**효능/효과**:\n{indications}\n\n**DUR/주의사항**:\n"
     for d in dur_data:
         answer += f"- {d['ingr_name']} ({d['type']}): {d['warning_msg']}\n"
 
@@ -593,5 +593,5 @@ async def generate_general_answer_node(state: AgentState) -> AgentState:
 
 async def generate_error_node(state: AgentState) -> AgentState:
     return {
-        "final_answer": "吏덈Ц???댄빐?섏? 紐삵뻽嫄곕굹 ?섏빟?덇낵 愿???녿뒗 ?붿껌?낅땲??"
+        "final_answer": "질문을 이해하지 못했거나 의약품과 관련 없는 요청입니다."
     }

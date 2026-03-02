@@ -238,11 +238,15 @@ async def symptom_products_api(request):
     from services.ai_service_v2 import AIService
 
     semaphore = asyncio.Semaphore(3)
+    target_visible_products = 3
+    candidate_fetch_limit = 10
+    max_extra_component_lookups = 24
+    max_excluded_reason_items = 4
 
     async def fetch_one(ingr):
         async with semaphore:
             try:
-                products_kwargs = {"limit": 3}
+                products_kwargs = {"limit": candidate_fetch_limit}
                 if symptom:
                     products_kwargs["symptom"] = symptom
                 products_task = MapService.get_us_otc_products_by_ingredient(
@@ -265,7 +269,140 @@ async def symptom_products_api(request):
                     "diagnostics": {"ingredient": ingr, "error": str(e)},
                 }
 
+    async def attach_other_component_dur_guidance(payload_items):
+        """Analyze other active components with KR DUR and filter risky products."""
+        unique_components = set()
+        for payload in payload_items or []:
+            for product in payload.get("products") or []:
+                for token in product.get("other_active_ingredients") or []:
+                    name = str(token or "").strip().upper()
+                    if name:
+                        unique_components.add(name)
+
+        extra_dur_map = {}
+        if unique_components:
+            capped_components = sorted(unique_components)[:max_extra_component_lookups]
+            extra_dur_data = await DrugService.get_kr_dur_info(capped_components)
+            for row in extra_dur_data or []:
+                name = str((row or {}).get("ingredient") or "").strip().upper()
+                kr_durs = (
+                    (row or {}).get("kr_durs")
+                    if isinstance((row or {}).get("kr_durs"), list)
+                    else []
+                )
+                if not name or not kr_durs:
+                    continue
+
+                risk_types = []
+                risk_summary = ""
+                for dur in kr_durs:
+                    if not isinstance(dur, dict):
+                        continue
+                    dur_type = str(dur.get("type") or "").strip()
+                    if dur_type:
+                        risk_types.append(dur_type)
+                    if not risk_summary:
+                        risk_summary = str(dur.get("warning") or "").strip()
+
+                risk_types = sorted(set([x for x in risk_types if x]))
+                if len(risk_summary) > 140:
+                    risk_summary = risk_summary[:137].rstrip() + "..."
+
+                extra_dur_map[name] = {
+                    "has_dur_risk": True,
+                    "dur_risk_types": risk_types[:3],
+                    "dur_risk_summary": risk_summary,
+                }
+
+        for payload in payload_items or []:
+            products = (
+                payload.get("products")
+                if isinstance(payload.get("products"), list)
+                else []
+            )
+            safe_products = []
+            excluded_products = []
+
+            for product in products:
+                components = (
+                    product.get("other_active_components")
+                    if isinstance(product.get("other_active_components"), list)
+                    else []
+                )
+                enriched_components = []
+                risk_components = []
+
+                for comp in components:
+                    if not isinstance(comp, dict):
+                        continue
+                    comp_name = str(comp.get("name") or "").strip().upper()
+                    meta = extra_dur_map.get(comp_name, {})
+                    has_risk = bool(meta.get("has_dur_risk"))
+                    if has_risk:
+                        risk_components.append(
+                            {
+                                "name": comp_name,
+                                "types": meta.get("dur_risk_types", []),
+                                "summary": meta.get("dur_risk_summary", ""),
+                            }
+                        )
+
+                    enriched_components.append(
+                        {
+                            **comp,
+                            "has_dur_risk": has_risk,
+                            "dur_risk_types": meta.get("dur_risk_types", []),
+                            "dur_risk_summary": meta.get("dur_risk_summary", ""),
+                        }
+                    )
+
+                if enriched_components:
+                    product["other_active_components"] = enriched_components
+
+                if risk_components:
+                    preview_names = ", ".join([c["name"] for c in risk_components[:3]])
+                    product["has_other_active_dur_risk"] = True
+                    product["other_active_dur_notice"] = (
+                        f"추가 주성분 DUR 위험으로 제외: {preview_names}"
+                    )
+                    excluded_products.append(
+                        {
+                            "brand_name": str(product.get("brand_name") or "Unknown Product"),
+                            "risk_components": risk_components[:3],
+                            "reason": product["other_active_dur_notice"],
+                        }
+                    )
+                    continue
+
+                product["has_other_active_dur_risk"] = False
+                safe_products.append(product)
+
+            payload["products"] = safe_products[:target_visible_products]
+            payload["excluded_products_due_to_other_component_dur"] = excluded_products[
+                :max_excluded_reason_items
+            ]
+            payload["other_component_dur_filtered_count"] = len(excluded_products)
+
+            if excluded_products:
+                if payload["products"]:
+                    payload["other_component_dur_notice"] = (
+                        f"추가 주성분 DUR 위험 제품 {len(excluded_products)}개를 제외하고 "
+                        f"복용 가능 후보 {len(payload['products'])}개를 추천합니다."
+                    )
+                else:
+                    payload["other_component_dur_notice"] = (
+                        "후보 제품이 추가 주성분 DUR 위험으로 제외되었습니다."
+                    )
+
+            diagnostics = payload.get("diagnostics")
+            if not isinstance(diagnostics, dict):
+                diagnostics = {}
+            diagnostics["other_component_dur_filtered"] = len(excluded_products)
+            diagnostics["other_component_dur_kept"] = len(payload["products"])
+            payload["diagnostics"] = diagnostics
+
     items = await asyncio.gather(*[fetch_one(ingr) for ingr in ingredients])
+    extra_component_task = asyncio.create_task(attach_other_component_dur_guidance(items))
 
     raw_warning_map = {
         item["ingredient"]: item.get("us_warning_raw")
@@ -273,6 +410,7 @@ async def symptom_products_api(request):
         if item.get("ingredient")
     }
     summarized_map = await AIService.bulk_summarize_fda_warnings(raw_warning_map)
+    await extra_component_task
 
     for item in items:
         ingredient = item.get("ingredient")
