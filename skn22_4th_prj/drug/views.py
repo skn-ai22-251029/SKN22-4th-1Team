@@ -1,6 +1,6 @@
-import asyncio
 import logging
 import re
+from asgiref.sync import async_to_sync
 
 try:
     from rest_framework.views import APIView
@@ -24,15 +24,14 @@ logger = logging.getLogger(__name__)
 
 
 class DrugSearchView(APIView):
-    async def get(self, request):
+    def get(self, request):
         params = getattr(request, "query_params", request.GET)
         query = params.get("q", "").strip()
         if not query:
             return Response([])
 
-        from services.supabase_service import SupabaseService
         # Supabase API를 통한 약품 검색
-        results = await SupabaseService.search_drugs(query)
+        results = async_to_sync(SupabaseService.search_drugs)(query)
 
         return Response(results)
 
@@ -68,7 +67,10 @@ class UsRoadmapView(APIView):
                 parsed.append(token)
         return parsed
 
-    async def get(self, request):
+    def get(self, request):
+        return async_to_sync(self._get_async)(request)
+
+    async def _get_async(self, request):
         params = getattr(request, "query_params", request.GET)
         ingredients = self._normalize_ingredients(params.getlist("ingredients"))
         kr_dosage_mg = float(params.get("kr_dosage_mg", 0.0))
@@ -140,14 +142,12 @@ class UsRoadmapView(APIView):
                                     }
                                 )
 
-            # Save to Cache
-            asyncio.create_task(
-                SupabaseService.set_roadmap_cache(
-                    query_text=cache_key,
-                    mapping_result=mapping_result,
-                    pharmacist_card=pharmacist_card,
-                    dosage_warnings=dosage_warnings,
-                )
+            # async_to_sync context may close the event loop immediately; save cache inline.
+            await SupabaseService.set_roadmap_cache(
+                query_text=cache_key,
+                mapping_result=mapping_result,
+                pharmacist_card=pharmacist_card,
+                dosage_warnings=dosage_warnings,
             )
 
             return Response(

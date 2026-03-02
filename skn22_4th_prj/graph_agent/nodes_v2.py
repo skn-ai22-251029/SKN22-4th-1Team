@@ -1,5 +1,6 @@
-import logging
+﻿import logging
 import asyncio
+import re
 from .state import AgentState
 from services.ai_service_v2 import AIService
 from services.drug_service import DrugService
@@ -58,10 +59,111 @@ def _has_user_risk_profile(user_profile):
 
     for key in ("current_medications", "allergies", "chronic_diseases"):
         value = str(user_profile.get(key) or "").strip().lower()
-        if value and value not in {"none", "없음", "없어요", "n/a", "na", "x"}:
+        if value and value not in {
+            "none",
+            "\uc5c6\uc74c",
+            "\uc5c6\uc5b4\uc694",
+            "n/a",
+            "na",
+            "x",
+        }:
             return True
     return False
 
+
+def _to_profile_text(value):
+    text = str(value or "").strip()
+    return text if text else "\uc785\ub825 \uc5c6\uc74c"
+
+
+def _looks_mojibake(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return True
+
+    if "??" in value or "\ufffd" in value:
+        return True
+
+    cjk = len(re.findall(r"[\u4E00-\u9FFF]", value))
+    hangul = len(re.findall(r"[\uAC00-\uD7A3]", value))
+    ascii_alpha = len(re.findall(r"[A-Za-z]", value))
+    if cjk >= 3 and hangul == 0 and ascii_alpha < 3:
+        return True
+
+    suspicious_tokens = ("?", "?", "?", "?", "?", "?", "??", "?")
+    if any(token in value for token in suspicious_tokens) and hangul < 2:
+        return True
+
+    return False
+
+
+def _fallback_reason(can_take: bool, warning_types) -> str:
+    warnings = [str(x).strip() for x in (warning_types or []) if str(x).strip()]
+    if can_take is False:
+        return (
+            "DUR \uc815\ubcf4\uc0c1 \ubcf5\uc6a9\ud558\uba74 "
+            "\uc704\ud5d8\ud558\ub2e4\uace0 \uc548\ub0b4\ub418\uace0 \uc788\uc2b5\ub2c8\ub2e4."
+        )
+    if warnings:
+        return (
+            f"DUR \uc8fc\uc758 \ud56d\ubaa9({', '.join(warnings[:3])}) "
+            "\uae30\uc900\uc73c\ub85c \uc8fc\uc758\uac00 \ud544\uc694\ud55c \uc131\ubd84\uc785\ub2c8\ub2e4."
+        )
+    return (
+        "\uac1c\uc778 \uac74\uac15\uc815\ubcf4(\ubcf5\uc6a9\uc57d/\uc54c\ub808\ub974\uae30/\uae30\uc800\uc9c8\ud658) "
+        "\uae30\uc900\uc5d0\uc11c \uc77c\ubc18 \ubcf5\uc6a9 \uac00\ub2a5\uc73c\ub85c \uc548\ub0b4\ub429\ub2c8\ub2e4."
+    )
+
+
+def _build_profile_reflection_tail(user_profile, ingredients_data):
+    if not isinstance(user_profile, dict):
+        return ""
+
+    meds = _to_profile_text(user_profile.get("current_medications"))
+    allergies = _to_profile_text(user_profile.get("allergies"))
+    diseases = _to_profile_text(user_profile.get("chronic_diseases"))
+
+    blocked = []
+    caution = []
+    for ing in ingredients_data or []:
+        if not isinstance(ing, dict):
+            continue
+        name = str(ing.get("name") or "").strip()
+        if not name:
+            continue
+        can_take = ing.get("can_take", True)
+        warnings = ing.get("dur_warning_types") or []
+        if can_take is False:
+            blocked.append(name)
+        elif warnings:
+            caution.append(name)
+
+    if blocked:
+        reflection = (
+            f"\uac1c\uc778 \uac74\uac15\uc815\ubcf4 \uae30\uc900\uc73c\ub85c "
+            f"\ubcf5\uc6a9 \uc81c\ud55c \uc131\ubd84\uc774 \ud655\uc778\ub418\uc5c8\uc2b5\ub2c8\ub2e4: "
+            f"{', '.join(blocked[:5])}"
+        )
+    elif caution:
+        reflection = (
+            f"\uac1c\uc778 \uac74\uac15\uc815\ubcf4 \uae30\uc900\uc73c\ub85c "
+            f"\uc8fc\uc758\uac00 \ud544\uc694\ud55c \uc131\ubd84\uc774 \ud655\uc778\ub418\uc5c8\uc2b5\ub2c8\ub2e4: "
+            f"{', '.join(caution[:5])}"
+        )
+    else:
+        reflection = (
+            "\uc785\ub825\ud55c \uac1c\uc778 \uac74\uac15\uc815\ubcf4 \uae30\uc900\uc5d0\uc11c "
+            "\uc911\ub300\ud55c \ubcf5\uc6a9 \uc81c\ud55c \uc131\ubd84\uc740 "
+            "\ud655\uc778\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4."
+        )
+
+    return (
+        "\n\n[\uac1c\uc778 \uac74\uac15\uc815\ubcf4 \ubc18\uc601 \uc694\uc57d]\n"
+        f"- \ubcf5\uc6a9 \uc911\uc778 \uc57d: {meds}\n"
+        f"- \uc54c\ub808\ub974\uae30: {allergies}\n"
+        f"- \uae30\uc800\uc9c8\ud658: {diseases}\n"
+        f"- \ubc18\uc601 \uacb0\uacfc: {reflection}"
+    )
 
 def _normalize_ai_ingredients(ai_ingredients, dur_data):
     """Build stable output entries from preselected DUR ingredients.
@@ -114,7 +216,7 @@ def _normalize_ai_ingredients(ai_ingredients, dur_data):
             normalized_map[name] = {
                 "name": name,
                 "can_take": True,
-                "reason": "개별 복용 판정 정보가 일부 누락되어 일반 주의 안내를 제공합니다.",
+                "reason": "개별 복용 판정 정보가 없어 일반 주의 안내를 제공합니다.",
                 "dur_warning_types": [],
             }
 
@@ -161,10 +263,26 @@ async def retrieve_data_node(state: AgentState) -> AgentState:
             try:
                 profile = await UserService.get_profile(user_info)
                 if profile:
+                    applied_allergies = (
+                        getattr(profile, "applied_allergies", None) or profile.allergies
+                    )
+                    applied_chronic_diseases = (
+                        getattr(profile, "applied_chronic_diseases", None)
+                        or profile.chronic_diseases
+                    )
+                    food_allergy_detail = (
+                        str(getattr(profile, "food_allergy_detail", "") or "").strip()
+                    )
+                    if food_allergy_detail and "상세정보:" not in str(applied_allergies or ""):
+                        applied_allergies = (
+                            f"{applied_allergies} | 상세정보: {food_allergy_detail}"
+                            if applied_allergies
+                            else f"상세정보: {food_allergy_detail}"
+                        )
                     user_profile_data = {
                         "current_medications": profile.current_medications,
-                        "allergies": profile.allergies,
-                        "chronic_diseases": profile.chronic_diseases,
+                        "allergies": applied_allergies,
+                        "chronic_diseases": applied_chronic_diseases,
                     }
             except Exception as e:
                 logger.error(f"Error fetching user profile from Supabase: {e}")
@@ -375,7 +493,7 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
 
     summary = ai_result.get("summary", "")
     if not isinstance(summary, str) or not summary.strip():
-        summary = "요청 증상에 대해 성분별 안전성과 주의사항을 정리했습니다."
+        summary = "요청 증상 관련 성분 안전성과 주의사항을 정리했습니다."
     ai_ingredients = _normalize_ai_ingredients(ai_result.get("ingredients", []), dur_data)
 
     # Policy: without user risk profile, do not classify ingredients as "cannot take".
@@ -386,7 +504,11 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
             ing["can_take"] = True
             reason = str(ing.get("reason") or "").strip()
             if not reason:
-                ing["reason"] = "개인 건강정보(복용약/알레르기/기저질환) 미입력 상태로 일반 복용 가능 기준으로 안내합니다."
+                ing["reason"] = (
+                    "\uac1c\uc778 \uac74\uac15\uc815\ubcf4(\ubcf5\uc6a9\uc57d/"
+                    "\uc54c\ub808\ub974\uae30/\uae30\uc800\uc9c8\ud658) \ubbf8\uc785\ub825 \uc0c1\ud0dc\ub85c "
+                    "\uc77c\ubc18 \ubcf5\uc6a9 \uac00\ub2a5 \uae30\uc900\uc73c\ub85c \uc548\ub0b4\ub429\ub2c8\ub2e4."
+                )
 
     dur_map = {item["ingredient"].upper(): item for item in dur_data}
     ai_map = {}
@@ -408,22 +530,38 @@ async def generate_symptom_answer_node(state: AgentState) -> AgentState:
     for name in ordered_names:
         dur_item = dur_map.get(name, {})
         ai_item = ai_map.get(name, {})
+        can_take = ai_item.get("can_take", True)
+        warning_types = ai_item.get("dur_warning_types", [])
         reason = str(ai_item.get("reason") or "").strip()
-        if not reason:
-            reason = "개인 건강정보(복용약/알레르기/기저질환) 미입력 상태로 일반 복용 가능 기준으로 안내합니다."
+        if _looks_mojibake(reason):
+            reason = _fallback_reason(can_take, warning_types)
+        if can_take is False:
+            risk_prefix = (
+                "DUR \uc815\ubcf4\uc0c1 \ubcf5\uc6a9\ud558\uba74 "
+                "\uc704\ud5d8\ud558\ub2e4\uace0 \uc548\ub0b4\ub418\uace0 \uc788\uc2b5\ub2c8\ub2e4."
+            )
+            if not reason:
+                reason = risk_prefix
+            elif risk_prefix not in reason:
+                reason = f"{risk_prefix} {reason}"
+        elif not reason:
+            reason = _fallback_reason(can_take, warning_types)
         entry = {
             "name": name,
-            "can_take": ai_item.get("can_take", True),
+            "can_take": can_take,
             "reason": reason,
-            "dur_warning_types": ai_item.get("dur_warning_types", []),
+            "dur_warning_types": warning_types,
             "kr_durs": dur_item.get("kr_durs", []),
             "fda_warning": dur_item.get("fda_warning", None),
             "products": products_map.get(name, []),
         }
         ingredients_data.append(entry)
 
+    profile_tail = _build_profile_reflection_tail(state.get("user_profile"), ingredients_data)
+    final_answer = summary + profile_tail if profile_tail else summary
+
     return {
-        "final_answer": summary,
+        "final_answer": final_answer,
         "dur_data": dur_data,
         "fda_data": fda_data,
         "ingredients_data": ingredients_data,
