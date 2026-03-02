@@ -118,6 +118,7 @@
 
       .card {
         overflow: hidden;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
       }
 
       .card.dur-emphasis {
@@ -136,6 +137,40 @@
         gap: 0.8rem;
         padding: 0.85rem 1rem;
         border-bottom: 1px solid #e3efe9;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .card-head::after {
+        content: "상세보기";
+        font-size: 0.73rem;
+        font-weight: 700;
+        color: #3e655c;
+        background: #edf7f3;
+        border: 1px solid #cfe5de;
+        border-radius: 999px;
+        padding: 0.14rem 0.48rem;
+        flex: 0 0 auto;
+      }
+
+      .card.is-active .card-head::after {
+        content: "접기";
+        color: #18483f;
+        background: #e4f3ee;
+      }
+
+      .card:hover {
+        border-color: #bddcd2;
+      }
+
+      .card .reason,
+      .card .body {
+        display: none;
+      }
+
+      .card.is-active .reason,
+      .card.is-active .body {
+        display: block;
       }
 
       .name {
@@ -339,6 +374,100 @@
         color: #365850;
       }
 
+      .component-item {
+        display: grid;
+        gap: 0.18rem;
+        padding: 0.2rem 0;
+      }
+
+      .component-main {
+        display: flex;
+        align-items: center;
+        gap: 0.32rem;
+        flex-wrap: wrap;
+      }
+
+      .component-name {
+        font-size: 0.78rem;
+        font-weight: 800;
+        color: #1e473f;
+      }
+
+      .component-benefit {
+        font-size: 0.76rem;
+        color: #476962;
+      }
+
+      .component-risk-text {
+        font-size: 0.74rem;
+        color: #8f2323;
+        line-height: 1.42;
+      }
+
+      .comp-risk-chip {
+        display: inline-block;
+        margin-left: 0.35rem;
+        padding: 0.08rem 0.35rem;
+        border-radius: 999px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        color: #9a2929;
+        background: #ffecec;
+        border: 1px solid #ffc8c8;
+      }
+
+      .product-dur-note {
+        margin-top: 0.28rem;
+        font-size: 0.76rem;
+        line-height: 1.42;
+        color: #8f2323;
+        background: #fff4f4;
+        border: 1px solid #ffd8d8;
+        border-radius: 8px;
+        padding: 0.26rem 0.42rem;
+      }
+
+      .excluded-products {
+        margin-top: 0.32rem;
+        border: 1px solid #ffd8d8;
+        background: #fff6f6;
+        border-radius: 8px;
+        padding: 0.42rem 0.5rem;
+      }
+
+      .excluded-products strong {
+        display: block;
+        font-size: 0.75rem;
+        color: #8f2323;
+      }
+
+      .excluded-products ul {
+        list-style: none;
+        display: grid;
+        gap: 0.22rem;
+        margin-top: 0.3rem;
+      }
+
+      .excluded-products li {
+        border: 0;
+        background: transparent;
+        padding: 0.16rem 0;
+        display: grid;
+        gap: 0.1rem;
+      }
+
+      .excluded-brand {
+        font-size: 0.76rem;
+        font-weight: 800;
+        color: #8f2323;
+      }
+
+      .excluded-reason {
+        font-size: 0.74rem;
+        line-height: 1.42;
+        color: #7f2b2b;
+      }
+
       .list-toggle {
         margin-top: 0.4rem;
         border: 1px solid #bde3d7;
@@ -515,7 +644,7 @@
                   {% if ing.can_take %}
                   <span class="badge safe">복용 가능</span>
                   {% else %}
-                  <span class="badge warn">주의 필요</span>
+                  <span class="badge warn">복용 위험</span>
                   {% endif %}
                   <span>{{ ing.name }}</span>
                 </div>
@@ -533,7 +662,7 @@
                   {% if ing.products %}
                   <h3 class="section-title">추천 OTC 제품</h3>
                   <ul class="products">
-                    {% for prod in ing.products|slice:":5" %}
+                    {% for prod in ing.products|slice:":3" %}
                     <li>
                       <div class="product-top">
                         {% if prod.amazon_image_url %}
@@ -547,7 +676,7 @@
                           {% else %}
                           <strong>{{ prod.brand_name|default:"Unknown Product" }}</strong>
                           {% endif %}
-                          <p class="product-meta">Manufacturer: {{ prod.manufacturer_name|default:"Unknown Manufacturer" }}</p>
+                          <p class="product-meta">제조사: {{ prod.manufacturer_name|default:"Unknown Manufacturer" }}</p>
                           <p class="product-links">
                             {% if prod.amazon_url %}
                             <a href="{{ prod.amazon_url }}" target="_blank" rel="noopener noreferrer">아마존 상세</a>
@@ -562,13 +691,29 @@
                       <p class="amazon-rank">Amazon BSR: {{ prod.amazon_rank_label }}</p>
                       {% endif %}
                       <p>{{ prod.summary_kr|default:"효능 요약 정보를 불러오지 못했습니다. 복용 전 용법·용량과 주의사항을 확인하세요." }}</p>
+                      {% if prod.other_active_dur_notice %}
+                      <p class="product-dur-note">{{ prod.other_active_dur_notice }}</p>
+                      {% endif %}
                       {% if prod.other_active_components %}
                       <span class="hover-trigger">추가 주성분 보기</span>
                       <div class="hover-box">
                         <strong>출력 성분 외 주성분</strong>
                         <ul>
                           {% for comp in prod.other_active_components %}
-                          <li>{{ comp.name }} : {{ comp.benefit }}</li>
+                          <li class="component-item">
+                            <div class="component-main">
+                              <strong class="component-name">{{ comp.name }}</strong>
+                              <span class="component-benefit">{{ comp.benefit }}</span>
+                              {% if comp.has_dur_risk %}
+                              <span class="comp-risk-chip">
+                                DUR 주의{% if comp.dur_risk_types %} - {{ comp.dur_risk_types|join:", " }}{% endif %}
+                              </span>
+                              {% endif %}
+                            </div>
+                            {% if comp.has_dur_risk and comp.dur_risk_summary %}
+                            <p class="component-risk-text">{{ comp.dur_risk_summary }}</p>
+                            {% endif %}
+                          </li>
                           {% endfor %}
                         </ul>
                       </div>
@@ -645,19 +790,52 @@
           .replaceAll("'", "&#39;");
       }
 
-      function updateProductCard(ingredient, products) {
+      function updateProductCard(ingredient, payloadItem) {
         const cards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
         const card = cards.find((el) => (el.dataset.ingredient || "").toUpperCase() === ingredient.toUpperCase());
         if (!card) return;
         const slot = card.querySelector('[data-role="product-slot"]');
         if (!slot) return;
 
+        const products = Array.isArray(payloadItem?.products) ? payloadItem.products : [];
+        const excludedProducts = Array.isArray(payloadItem?.excluded_products_due_to_other_component_dur)
+          ? payloadItem.excluded_products_due_to_other_component_dur
+          : [];
+        const ingredientNotice = escapeHtml(payloadItem?.other_component_dur_notice || "");
+        const excludedItemsHtml = excludedProducts.map((x) => {
+          const brand = escapeHtml(x.brand_name || "Unknown Product");
+          const riskComponents = Array.isArray(x.risk_components) ? x.risk_components : [];
+          const reasons = riskComponents
+            .map((r) => {
+              const name = escapeHtml(r.name || "");
+              const types = Array.isArray(r.types) && r.types.length
+                ? ` (${escapeHtml(r.types.join(", "))})`
+                : "";
+              return `${name}${types}`;
+            })
+            .filter(Boolean)
+            .join(", ");
+          const reasonText = reasons || escapeHtml(x.reason || "추가 주성분 DUR 위험");
+          return `<li><strong class="excluded-brand">${brand}</strong><span class="excluded-reason">제외 사유: ${reasonText}</span></li>`;
+        }).join("");
+
         if (!products || !products.length) {
+          if (excludedProducts.length) {
+            slot.innerHTML = `
+              <p>추천 후보가 추가 주성분 DUR 위험으로 제외되었습니다.</p>
+              <div class="excluded-products">
+                <strong>제외된 제품 사유</strong>
+                <ul>${excludedItemsHtml}</ul>
+              </div>
+            `;
+            return;
+          }
+
           slot.innerHTML = "<p>검색된 OTC 제품이 없습니다.</p>";
           return;
         }
 
-        const items = products.slice(0, 5).map((prod) => {
+        const items = products.slice(0, 3).map((prod) => {
           const brand = escapeHtml(prod.brand_name);
           const manufacturer = escapeHtml(prod.manufacturer_name || "Unknown Manufacturer");
           const rankLabel = escapeHtml(prod.amazon_rank_label || "");
@@ -667,6 +845,7 @@
           const summaryKr = escapeHtml(
             prod.summary_kr || "효능 요약 정보를 불러오지 못했습니다. 복용 전 용법·용량과 주의사항을 확인하세요."
           );
+          const otherDurNotice = escapeHtml(prod.other_active_dur_notice || "");
           const components = Array.isArray(prod.other_active_components)
             ? prod.other_active_components.filter((x) => x && x.name)
             : [];
@@ -676,10 +855,24 @@
               <div class="hover-box">
                 <strong>출력 성분 외 주성분</strong>
                 <ul>${components
-                  .map((x) => `<li>${escapeHtml(x.name)} : ${escapeHtml(x.benefit || "증상 완화 보조")}</li>`)
+                  .map((x) => {
+                    const riskTypes = Array.isArray(x.dur_risk_types)
+                      ? x.dur_risk_types.filter((t) => t)
+                      : [];
+                    const riskChip = x.has_dur_risk
+                      ? `<span class="comp-risk-chip">DUR 주의${riskTypes.length ? ` - ${escapeHtml(riskTypes.join(", "))}` : ""}</span>`
+                      : "";
+                    const riskSummary = x.has_dur_risk && x.dur_risk_summary
+                      ? `<p class="component-risk-text">${escapeHtml(x.dur_risk_summary)}</p>`
+                      : "";
+                    return `<li class="component-item"><div class="component-main"><strong class="component-name">${escapeHtml(x.name)}</strong><span class="component-benefit">${escapeHtml(x.benefit || "증상 완화 보조")}</span>${riskChip}</div>${riskSummary}</li>`;
+                  })
                   .join("")}</ul>
               </div>
             `
+            : "";
+          const otherDurNoticeHtml = otherDurNotice
+            ? `<p class="product-dur-note">${otherDurNotice}</p>`
             : "";
           const rankHtml = rankLabel
             ? `<p class="amazon-rank">Amazon BSR: ${rankLabel}</p>`
@@ -702,10 +895,26 @@
             .filter(Boolean)
             .join("");
           const linksHtml = linkButtons ? `<p class="product-links">${linkButtons}</p>` : "";
-          return `<li><div class="product-top">${imageHtml}<div class="product-main">${titleHtml}<p class="product-meta">Manufacturer: ${manufacturer}</p>${linksHtml}</div></div>${rankHtml}<p>${summaryKr}</p>${extrasHtml}</li>`;
+          return `<li><div class="product-top">${imageHtml}<div class="product-main">${titleHtml}<p class="product-meta">제조사: ${manufacturer}</p>${linksHtml}</div></div>${rankHtml}<p>${summaryKr}</p>${otherDurNoticeHtml}${extrasHtml}</li>`;
         }).join("");
 
-        slot.innerHTML = `<h3 class="section-title">추천 OTC 제품</h3><ul class="products">${items}</ul>`;
+        const excludedSection = excludedProducts.length
+          ? `<div class="excluded-products"><strong>추가 주성분 DUR 위험으로 제외된 제품 ${excludedProducts.length}개</strong><ul>${excludedItemsHtml}</ul></div>`
+          : "";
+        const ingredientNoticeHtml = ingredientNotice
+          ? `<p class="product-dur-note">${ingredientNotice}</p>`
+          : "";
+
+        slot.innerHTML = `<h3 class="section-title">추천 OTC 제품</h3>${ingredientNoticeHtml}<ul class="products">${items}</ul>${excludedSection}`;
+      }
+
+      function setRiskOnlyProductNotice(ingredient) {
+        const cards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+        const card = cards.find((el) => (el.dataset.ingredient || "").toUpperCase() === ingredient.toUpperCase());
+        if (!card) return;
+        const slot = card.querySelector('[data-role="product-slot"]');
+        if (!slot) return;
+        slot.innerHTML = "<p>DUR 정보상 복용하면 위험하다고 안내되고 있습니다.</p>";
       }
 
       function updateUsWarning(ingredient, warningText) {
@@ -721,6 +930,55 @@
         }
       }
 
+      function setActiveIngredientCard(targetCard) {
+        const cards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+        cards.forEach((card) => {
+          const isActive = card === targetCard && !card.classList.contains("hidden-card");
+          card.classList.toggle("is-active", isActive);
+          card.setAttribute("aria-expanded", isActive ? "true" : "false");
+        });
+      }
+
+      function ensureActiveIngredientCard() {
+        const cards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+        const visibleCards = cards.filter((card) => !card.classList.contains("hidden-card"));
+        if (!visibleCards.length) return;
+
+        const activeVisible = visibleCards.find((card) => card.classList.contains("is-active"));
+        if (activeVisible) return;
+
+        setActiveIngredientCard(visibleCards[0]);
+      }
+
+      function initIngredientCardInteractions() {
+        const cards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+        if (!cards.length) return;
+
+        cards.forEach((card) => {
+          const head = card.querySelector(".card-head");
+          if (!head || head.dataset.interactiveBound === "1") return;
+
+          head.dataset.interactiveBound = "1";
+          head.setAttribute("role", "button");
+          head.setAttribute("tabindex", "0");
+
+          const activate = () => {
+            if (card.classList.contains("hidden-card")) return;
+            setActiveIngredientCard(card);
+          };
+
+          head.addEventListener("click", activate);
+          head.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              activate();
+            }
+          });
+        });
+
+        ensureActiveIngredientCard();
+      }
+
       function hideIngredientRows(ingredient) {
         const ingUpper = String(ingredient || "").toUpperCase();
         const mainCards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
@@ -729,6 +987,7 @@
         const main = mainCards.find((el) => (el.dataset.ingredient || "").toUpperCase() === ingUpper);
         if (main) {
           main.classList.add("hidden-card");
+          main.classList.remove("is-active");
           main.setAttribute("data-otc-hidden", "1");
         }
 
@@ -769,13 +1028,44 @@
           ingredientsData = [];
         }
 
+        const toCanTakeFlag = (value) => {
+          if (typeof value === "boolean") return value;
+          const token = String(value || "").trim().toLowerCase();
+          return ["true", "1", "yes", "y"].includes(token);
+        };
+
+        const ingredientMetaMap = new Map();
+        ingredientsData.forEach((ing) => {
+          if (!ing || !ing.name) return;
+          const name = String(ing.name).trim().toUpperCase();
+          if (!name) return;
+          ingredientMetaMap.set(name, {
+            can_take: toCanTakeFlag(ing.can_take),
+          });
+        });
+
         const safeIngredients = ingredientsData
-          .filter((ing) => ing && ing.name)
+          .filter((ing) => ing && ing.name && toCanTakeFlag(ing.can_take))
+          .map((ing) => String(ing.name).trim().toUpperCase());
+
+        const riskIngredients = ingredientsData
+          .filter((ing) => ing && ing.name && !toCanTakeFlag(ing.can_take))
           .map((ing) => String(ing.name).trim().toUpperCase());
 
         if (!safeIngredients.length) {
+          const orderedCards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
+          orderedCards.forEach((card) => {
+            const ingredient = String(card.dataset.ingredient || "").toUpperCase();
+            if (riskIngredients.includes(ingredient)) {
+              showIngredientRows(ingredient);
+              setRiskOnlyProductNotice(ingredient);
+            } else {
+              hideIngredientRows(ingredient);
+            }
+          });
+          ensureActiveIngredientCard();
           if (statusEl) {
-            statusEl.textContent = "복용 가능 성분이 없어 제품 조회를 생략했습니다.";
+            statusEl.textContent = "DUR 기준 복용 가능 성분이 없어 제품 조회를 생략했습니다.";
           }
           return;
         }
@@ -793,32 +1083,64 @@
           const productMap = new Map();
           items.forEach((item) => {
             const ingredient = String(item.ingredient || "").toUpperCase();
-            const products = item.products || [];
-            productMap.set(ingredient, { products, us_warning: item.us_warning || "" });
+            productMap.set(ingredient, {
+              products: Array.isArray(item.products) ? item.products : [],
+              us_warning: item.us_warning || "",
+              other_component_dur_notice: item.other_component_dur_notice || "",
+              excluded_products_due_to_other_component_dur: Array.isArray(item.excluded_products_due_to_other_component_dur)
+                ? item.excluded_products_due_to_other_component_dur
+                : [],
+              other_component_dur_filtered_count: Number(item.other_component_dur_filtered_count || 0),
+            });
           });
 
           const orderedCards = Array.from(document.querySelectorAll(".card[data-ingredient]"));
           let keptCount = 0;
+          let filteredByOtherComponentCount = 0;
           orderedCards.forEach((card) => {
             const ingredient = String(card.dataset.ingredient || "").toUpperCase();
-            const payloadItem = productMap.get(ingredient) || { products: [], us_warning: "" };
+            const meta = ingredientMetaMap.get(ingredient) || { can_take: true };
+
+            if (meta.can_take === false) {
+              showIngredientRows(ingredient);
+              setRiskOnlyProductNotice(ingredient);
+              updateUsWarning(ingredient, "복용 위험 성분으로 미국 OTC 조회 대상에서 제외되었습니다.");
+              return;
+            }
+
+            const payloadItem = productMap.get(ingredient) || {
+              products: [],
+              us_warning: "",
+              other_component_dur_notice: "",
+              excluded_products_due_to_other_component_dur: [],
+              other_component_dur_filtered_count: 0,
+            };
             const products = payloadItem.products || [];
-            if (!products.length || keptCount >= 5) {
+            const excludedDueToOther = payloadItem.excluded_products_due_to_other_component_dur || [];
+            const hasExcludedOnly = !products.length && excludedDueToOther.length > 0;
+            filteredByOtherComponentCount += Number(payloadItem.other_component_dur_filtered_count || 0);
+
+            if ((!products.length && !hasExcludedOnly) || (keptCount >= 3 && !hasExcludedOnly)) {
               hideIngredientRows(ingredient);
               return;
             }
 
-            keptCount += 1;
+            if (products.length) {
+              keptCount += 1;
+            }
             showIngredientRows(ingredient);
-            updateProductCard(ingredient, products);
+            updateProductCard(ingredient, payloadItem);
             updateUsWarning(ingredient, payloadItem.us_warning || "");
           });
+          ensureActiveIngredientCard();
 
           if (statusEl) {
             if (keptCount > 0) {
-              statusEl.textContent = `미국 OTC 제품이 확인된 성분 ${keptCount}개를 기준으로 종합 DUR 정보를 업데이트했습니다. OTC 제품이 없는 성분은 결과에서 제외했습니다.`;
+              statusEl.textContent = `복용 가능 성분 중 미국 OTC 제품이 확인된 ${keptCount}개를 기준으로 결과를 업데이트했습니다. DUR 기준 복용 위험 성분은 제품 조회에서 제외했습니다.${filteredByOtherComponentCount > 0 ? ` 추가 주성분 DUR 위험으로 ${filteredByOtherComponentCount}개 제품을 제외했습니다.` : ""}`;
             } else {
-              statusEl.textContent = "해당 성분들로 미국 OTC 제품이 확인되지 않아 추천 결과에서 제외되었습니다.";
+              statusEl.textContent = filteredByOtherComponentCount > 0
+                ? `복용 가능 성분의 후보 제품이 추가 주성분 DUR 위험으로 제외되었습니다. (제외 ${filteredByOtherComponentCount}개)`
+                : "복용 가능 성분에서 미국 OTC 제품이 확인되지 않아 제품 추천 결과에서 제외되었습니다.";
             }
           }
         } catch (error) {
@@ -829,6 +1151,7 @@
       }
 
       document.addEventListener("DOMContentLoaded", () => {
+        initIngredientCardInteractions();
         initAsyncProductEnrichment();
       });
     </script>

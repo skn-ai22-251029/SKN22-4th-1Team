@@ -436,7 +436,7 @@ class MapService:
 
     @classmethod
     async def get_us_otc_products_by_ingredient(
-        cls, ingredient: str, limit: int = 5, symptom: str = ""
+        cls, ingredient: str, limit: int = 3, symptom: str = ""
     ):
         """Fetch OTC products containing the given ingredient from openFDA."""
         normalized_ingredient = cls._normalize_ingredient(ingredient)
@@ -655,7 +655,7 @@ class MapService:
         )
 
         for rec in component_recommendations:
-            rec["products"] = rec.get("products", [])[:5]
+            rec["products"] = rec.get("products", [])[:3]
 
         return {
             "match_type": "COMPONENT_MATCH",

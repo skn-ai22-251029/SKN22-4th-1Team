@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 
 class SupabaseService:
     _client = None
+    _KCD_TABLE = "kcd_info"
+    _KCD_CODE_COL = "kcd_code"
+    _KCD_NAME_KOR_COL = "kcd_name_kor"
+    _KCD_NAME_ENG_COL = "kcd_name_eng"
 
     @staticmethod
     async def _run_io(func):
@@ -24,14 +28,93 @@ class SupabaseService:
             return cls._client
 
         url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY")
+        service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        anon_key = os.environ.get("SUPABASE_KEY")
+        key = service_role_key or anon_key
 
         if not url or not key:
-            logger.error("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+            logger.error(
+                "SUPABASE_URL and one of SUPABASE_SERVICE_ROLE_KEY/SUPABASE_KEY must be set in .env"
+            )
             return None
+
+        if not service_role_key:
+            logger.warning(
+                "[Supabase] SUPABASE_SERVICE_ROLE_KEY is not set; RLS may block profile writes."
+            )
 
         cls._client = create_client(url, key)
         return cls._client
+
+    @staticmethod
+    def _dedupe_ordered(items):
+        unique_items = []
+        seen = set()
+        for raw in items or []:
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_items.append(value)
+        return unique_items
+
+    @staticmethod
+    def _kcd_compact(text: str) -> str:
+        return re.sub(r"\s+", "", str(text or "")).lower()
+
+    @classmethod
+    def _is_kcd_source_missing_error(cls, error: Exception) -> bool:
+        message = str(error or "").lower()
+        return (
+            ("relation" in message and "does not exist" in message)
+            or ("table" in message and "not found" in message)
+            or ("could not find the table" in message)
+        )
+
+    @classmethod
+    async def _ensure_kcd_source(cls):
+        """Standardized to use kcd_info table for KCD 9th revision."""
+        source = {
+            "table": cls._KCD_TABLE,
+            "code_col": cls._KCD_CODE_COL,
+            "name_kor_col": cls._KCD_NAME_KOR_COL,
+            "name_eng_col": cls._KCD_NAME_ENG_COL,
+            "ready": False,
+            "reason": None,
+            "error": None,
+        }
+
+        client = cls.get_client()
+        if not client:
+            source["reason"] = "supabase_unavailable"
+            source["error"] = "Supabase client is unavailable."
+            return source
+
+        try:
+            await cls._run_io(
+                lambda: (
+                    client.table(source["table"])
+                    .select(f"{source['code_col']}, {source['name_kor_col']}")
+                    .limit(1)
+                    .execute()
+                )
+            )
+            source["ready"] = True
+            return source
+        except Exception as e:
+            source["reason"] = (
+                "kcd_source_missing"
+                if cls._is_kcd_source_missing_error(e)
+                else "kcd_source_query_error"
+            )
+            source["error"] = str(e)
+            logger.error(
+                f"[Supabase] KCD source check failed ({source['table']}): {source['error']}"
+            )
+            return source
 
     @classmethod
     async def auth_sign_up(cls, email, password):
@@ -77,9 +160,14 @@ class SupabaseService:
     @classmethod
     async def auth_delete_user(cls, user_id: str):
         url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY")
+        service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        key = service_role_key or os.environ.get("SUPABASE_KEY")
         if not url or not key:
             return False, "Supabase credentials are not configured."
+        if not service_role_key:
+            logger.warning(
+                "[Supabase] SUPABASE_SERVICE_ROLE_KEY is missing; admin.delete_user may fail."
+            )
         try:
             # Use a fresh client to avoid stale auth state after admin operations.
             fresh_client = await cls._run_io(lambda: create_client(url, key))
@@ -443,12 +531,16 @@ class SupabaseService:
         if not client:
             return []
 
+        keyword = str(query_text or "").strip()
+        if not keyword:
+            return []
+
         try:
             response = await cls._run_io(
                 lambda: (
-                client.table("unified_drug_info")
+                client.table("drug_permit_info")
                 .select("item_name, entp_name")
-                .or_(f"item_name.ilike.%{query_text}%,entp_name.ilike.%{query_text}%")
+                .ilike("item_name", f"%{keyword}%")
                 .limit(limit)
                 .execute()
                 )
@@ -457,6 +549,371 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"[Supabase] Drug search error: {e}")
             return []
+
+    @classmethod
+    async def resolve_valid_drug_names(cls, drug_names: list):
+        """Return (valid_names, invalid_names) by exact name lookup in drug_permit_info."""
+        client = cls.get_client()
+        if not client:
+            return [], cls._dedupe_ordered(drug_names)
+
+        names = cls._dedupe_ordered(drug_names)
+        if not names:
+            return [], []
+
+        valid_names = []
+        invalid_names = []
+        for name in names:
+            rows = []
+            try:
+                response = await cls._run_io(
+                    lambda: (
+                        client.table("drug_permit_info")
+                        .select("item_name")
+                        .eq("item_name", name)
+                        .limit(1)
+                        .execute()
+                    )
+                )
+                rows = response.data or []
+
+                if not rows:
+                    response = await cls._run_io(
+                        lambda: (
+                            client.table("drug_permit_info")
+                            .select("item_name")
+                            .ilike("item_name", name)
+                            .limit(1)
+                            .execute()
+                        )
+                    )
+                    rows = response.data or []
+            except Exception as e:
+                logger.warning(f"[Supabase] Drug name validation failed for '{name}': {e}")
+                invalid_names.append(name)
+                continue
+
+            if rows:
+                canonical_name = str((rows[0] or {}).get("item_name") or "").strip()
+                valid_names.append(canonical_name or name)
+            else:
+                invalid_names.append(name)
+
+        return cls._dedupe_ordered(valid_names), cls._dedupe_ordered(invalid_names)
+
+    @classmethod
+    async def search_kcd(cls, query_text: str, limit: int = 20):
+        source = await cls._ensure_kcd_source()
+        if not source.get("ready"):
+            return []
+
+        keyword = str(query_text or "").strip()
+        if not keyword:
+            return []
+        keyword_lower = keyword.lower()
+        keyword_code = re.sub(r"\s+", "", keyword).upper()
+ 
+        client = cls.get_client()
+        if not client:
+            return []
+ 
+        table_name = source["table"]
+        code_col = source["code_col"]
+        name_kor_col = source["name_kor_col"]
+        name_eng_col = source["name_eng_col"]
+ 
+        try:
+            # Search in both Korean and English names
+            response = await cls._run_io(
+                lambda: (
+                    client.table(table_name)
+                    .select(f"{code_col}, {name_kor_col}, {name_eng_col}")
+                    .or_(
+                        f"{name_kor_col}.ilike.%{keyword}%,"
+                        f"{name_eng_col}.ilike.%{keyword}%,"
+                        f"{code_col}.ilike.%{keyword}%"
+                    )
+                    .limit(limit)
+                    .execute()
+                )
+            )
+            rows = response.data or []
+        except Exception as e:
+            logger.error(f"[Supabase] KCD search error for '{keyword}': {e}")
+            return []
+
+        def _score(row):
+            code = str(row.get(code_col) or "").strip().upper()
+            kor_name = str(row.get(name_kor_col) or "").strip().lower()
+            eng_name = str(row.get(name_eng_col) or "").strip().lower()
+
+            if code == keyword_code:
+                return (0, len(code), code)
+            if code.startswith(keyword_code):
+                return (1, len(code), code)
+            if keyword_code and keyword_code in code:
+                return (2, len(code), code)
+            if kor_name.startswith(keyword_lower):
+                return (3, len(kor_name), code)
+            if keyword_lower in kor_name:
+                return (4, len(kor_name), code)
+            if eng_name.startswith(keyword_lower):
+                return (5, len(eng_name), code)
+            if keyword_lower in eng_name:
+                return (6, len(eng_name), code)
+            return (7, len(code), code)
+
+        rows = sorted(rows, key=_score)
+ 
+        results = []
+        seen_codes = set()
+        for row in rows:
+            code = str(row.get(code_col) or "").strip().upper()
+            kor_name = str(row.get(name_kor_col) or "").strip()
+            eng_name = str(row.get(name_eng_col) or "").strip()
+            
+            if not code or not kor_name or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            
+            # Display format: "Korean Name (English Name) [Code]" or "Korean Name [Code]"
+            display_name = kor_name
+            if eng_name:
+                display_name = f"{kor_name} ({eng_name})"
+                
+            results.append({
+                "kcd_code": code,
+                "kcd_name": kor_name,
+                "kcd_name_eng": eng_name,
+                "display": display_name
+            })
+        return results
+
+    @classmethod
+    async def resolve_kcd_terms(cls, raw_terms: list):
+        """
+        Resolve user-entered disease/allergy terms into canonical KCD records.
+        Returns (resolved_items, unresolved_terms, kcd_ready, details).
+        """
+        terms = cls._dedupe_ordered(raw_terms)
+        if not terms:
+            return [], [], True, {
+                "source_error": None,
+                "unmatched": [],
+                "ambiguous": [],
+                "lookup_errors": [],
+            }
+
+        source = await cls._ensure_kcd_source()
+        if not source.get("ready"):
+            return [], terms, False, {
+                "source_error": source.get("reason"),
+                "unmatched": [],
+                "ambiguous": [],
+                "lookup_errors": [],
+            }
+ 
+        client = cls.get_client()
+        if not client:
+            return [], terms, False, {
+                "source_error": "supabase_unavailable",
+                "unmatched": [],
+                "ambiguous": [],
+                "lookup_errors": [],
+            }
+ 
+        table_name = source["table"]
+        code_col = source["code_col"]
+        name_kor_col = source["name_kor_col"]
+        name_eng_col = source["name_eng_col"]
+ 
+        resolved = []
+        unresolved = []
+        unmatched = []
+        ambiguous = []
+        lookup_errors = []
+        code_pattern = re.compile(r"\b([A-Za-z]\d{2}(?:\.\d+)?)\b")
+ 
+        for term in terms:
+            token = str(term or "").strip()
+            if not token:
+                continue
+ 
+            rows = []
+            code_match = code_pattern.search(token)
+            if code_match:
+                code = code_match.group(1).upper()
+                try:
+                    response = await cls._run_io(
+                        lambda: (
+                            client.table(table_name)
+                            .select(f"{code_col}, {name_kor_col}, {name_eng_col}")
+                            .eq(code_col, code)
+                            .limit(1)
+                            .execute()
+                        )
+                    )
+                    rows = response.data or []
+                except Exception as e:
+                    logger.warning(f"[Supabase] KCD code lookup failed for '{code}': {e}")
+                    if cls._is_kcd_source_missing_error(e):
+                        return [], terms, False, {
+                            "source_error": "kcd_source_missing",
+                            "unmatched": [],
+                            "ambiguous": [],
+                            "lookup_errors": [token],
+                        }
+                    lookup_errors.append(token)
+                    unresolved.append(term)
+                    continue
+            else:
+                try:
+                    # Match in either kor or eng names
+                    response = await cls._run_io(
+                        lambda: (
+                            client.table(table_name)
+                            .select(f"{code_col}, {name_kor_col}, {name_eng_col}")
+                            .or_(
+                                f"{name_kor_col}.ilike.%{token}%,"
+                                f"{name_eng_col}.ilike.%{token}%,"
+                                f"{code_col}.ilike.%{token}%"
+                            )
+                            .limit(10)
+                            .execute()
+                        )
+                    )
+                    candidates = response.data or []
+                except Exception as e:
+                    logger.warning(f"[Supabase] KCD name lookup failed for '{token}': {e}")
+                    if cls._is_kcd_source_missing_error(e):
+                        return [], terms, False, {
+                            "source_error": "kcd_source_missing",
+                            "unmatched": [],
+                            "ambiguous": [],
+                            "lookup_errors": [token],
+                        }
+                    lookup_errors.append(token)
+                    unresolved.append(term)
+                    continue
+ 
+                exact_matches = []
+                compact_token = cls._kcd_compact(token)
+                for row in candidates:
+                    cand_kor = str(row.get(name_kor_col) or "").strip()
+                    cand_eng = str(row.get(name_eng_col) or "").strip()
+                    if cls._kcd_compact(cand_kor) == compact_token or cls._kcd_compact(cand_eng) == compact_token:
+                        exact_matches.append(row)
+ 
+                if len(exact_matches) == 1:
+                    rows = exact_matches
+                elif len(candidates) == 1:
+                    rows = candidates
+                else:
+                    if candidates:
+                        ambiguous.append(token)
+                    else:
+                        unmatched.append(token)
+                    unresolved.append(term)
+                    continue
+ 
+            if not rows:
+                unmatched.append(token)
+                unresolved.append(term)
+                continue
+ 
+            row = rows[0] or {}
+            code = str(row.get(code_col) or "").strip().upper()
+            kor_name = str(row.get(name_kor_col) or "").strip()
+            eng_name = str(row.get(name_eng_col) or "").strip()
+             
+            if not code or not kor_name:
+                unmatched.append(token)
+                unresolved.append(term)
+                continue
+ 
+            display = kor_name
+            if eng_name:
+                display = f"{kor_name} ({eng_name}) [{code}]"
+            else:
+                display = f"{kor_name} [{code}]"
+ 
+            resolved.append(
+                {
+                    "kcd_code": code,
+                    "kcd_name": kor_name,
+                    "kcd_name_eng": eng_name,
+                    "display": display,
+                }
+            )
+ 
+        deduped_resolved = []
+        seen_codes = set()
+        for item in resolved:
+            code = str(item.get("kcd_code") or "").upper()
+            if not code or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            deduped_resolved.append(item)
+ 
+        details = {
+            "source_error": None,
+            "unmatched": cls._dedupe_ordered(unmatched),
+            "ambiguous": cls._dedupe_ordered(ambiguous),
+            "lookup_errors": cls._dedupe_ordered(lookup_errors),
+        }
+        return deduped_resolved, cls._dedupe_ordered(unresolved), True, details
+
+    @classmethod
+    async def get_main_ingr_eng_for_drugs(cls, drug_names: list):
+        """Resolve selected drug names to unified main_ingr_eng list."""
+        client = cls.get_client()
+        if not client or not isinstance(drug_names, list):
+            return ""
+
+        unique_names = []
+        seen = set()
+        for raw in drug_names:
+            name = str(raw or "").strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            unique_names.append(name)
+
+        if not unique_names:
+            return ""
+
+        ingredients = []
+        ingredient_seen = set()
+
+        for name in unique_names:
+            try:
+                response = await cls._run_io(
+                    lambda: (
+                        client.table("unified_drug_info")
+                        .select("main_ingr_eng")
+                        .eq("item_name", name)
+                        .limit(1)
+                        .execute()
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"[Supabase] main_ingr lookup failed for '{name}': {e}")
+                continue
+
+            rows = response.data or []
+            if not rows:
+                continue
+            token = str((rows[0] or {}).get("main_ingr_eng") or "").strip()
+            if not token:
+                continue
+            key = token.lower()
+            if key in ingredient_seen:
+                continue
+            ingredient_seen.add(key)
+            ingredients.append(token)
+
+        return ", ".join(ingredients)
 
     @classmethod
     async def get_user_profile(cls, user_id: str):
@@ -488,10 +945,43 @@ class SupabaseService:
         allergies: str,
         chronic_diseases: str,
         is_pregnant: bool = False,
+        main_ingr_eng: str = "",
+        applied_allergies: str = "",
+        applied_chronic_diseases: str = "",
+        food_allergy_detail: str = "",
     ):
         client = cls.get_client()
         if not client:
             return None
+
+        def _is_missing_col_error(err: Exception, column_name: str) -> bool:
+            message = str(err or "").lower()
+            missing_column_hint = (
+                "column" in message and ("could not find" in message or "not found" in message)
+            )
+            return (
+                column_name.lower() in message
+                and (
+                    "does not exist" in message
+                    or "not found" in message
+                    or missing_column_hint
+                )
+            )
+
+        def _is_rls_error(err: Exception) -> bool:
+            message = str(err or "").lower()
+            return (
+                "row-level security" in message
+                or "'code': '42501'" in message
+                or '"code": "42501"' in message
+            )
+
+        async def _upsert(payload: dict):
+            return await cls._run_io(
+                lambda: client.table("user_profile")
+                .upsert(payload, on_conflict="user_id")
+                .execute()
+            )
 
         try:
             payload = {
@@ -500,14 +990,51 @@ class SupabaseService:
                 "allergies": allergies,
                 "chronic_diseases": chronic_diseases,
                 "is_pregnant": is_pregnant,
+                "main_ingr_eng": main_ingr_eng,
+                "applied_allergies": applied_allergies or allergies,
+                "applied_chronic_diseases": (
+                    applied_chronic_diseases or chronic_diseases
+                ),
+                "food_allergy_detail": food_allergy_detail,
             }
-            response = await cls._run_io(
-                lambda: client.table("user_profile")
-                .upsert(payload, on_conflict="user_id")
-                .execute()
-            )
-            return response.data[0] if response.data else None
+            optional_columns = [
+                ("main_ingr_eng", "main_ingr_eng"),
+                ("applied_allergies", "applied_allergies"),
+                ("applied_chronic_diseases", "applied_chronic_diseases"),
+                ("food_allergy_detail", "food_allergy_detail"),
+            ]
+
+            while True:
+                try:
+                    response = await _upsert(payload)
+                    if response.data:
+                        return response.data[0]
+
+                    # Some Supabase setups return empty data on upsert; fetch row explicitly.
+                    return await cls.get_user_profile(str(user_id))
+                except Exception as upsert_error:
+                    missing_col = None
+                    for payload_key, column_name in optional_columns:
+                        if payload_key in payload and _is_missing_col_error(
+                            upsert_error, column_name
+                        ):
+                            missing_col = payload_key
+                            break
+
+                    if not missing_col:
+                        raise upsert_error
+
+                    payload.pop(missing_col, None)
+                    logger.warning(
+                        f"[Supabase] {missing_col} column missing, retrying profile upsert without it for user {user_id}"
+                    )
         except Exception as e:
+            if _is_rls_error(e):
+                logger.error(
+                    "[Supabase] Profile update blocked by RLS. "
+                    "Use SUPABASE_SERVICE_ROLE_KEY on server-side DB writes "
+                    "or adjust user_profile RLS policies."
+                )
             logger.error(f"[Supabase] Profile update error for user {user_id}: {e}")
             return None
 

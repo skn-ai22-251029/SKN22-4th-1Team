@@ -146,7 +146,7 @@ python check_tables.py
 ```powershell
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python -m uvicorn skn22_4th_prj.asgi:application --host 0.0.0.0 --port 8000 --reload
+uvicorn skn22_4th_prj.asgi:application --reload --port 8000
 ```
 
 ### 2) `No module named pip`
