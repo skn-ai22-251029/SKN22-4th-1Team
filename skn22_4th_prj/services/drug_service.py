@@ -278,15 +278,27 @@ class DrugService:
 
         durs = list(DurMaster.objects.filter(query))
 
-        return [
-            {
-                "type": d.dur_type,
-                "ingr_name": d.ingr_kor_name,
-                "warning_msg": d.prohbt_content or d.remark,
-                "severity": d.critical_value,
-            }
-            for d in durs
-        ]
+        seen = set()
+        results = []
+        for d in durs:
+            dur_type = d.dur_type
+            warning_msg = d.prohbt_content or d.remark
+            
+            # Create a unique key for deduplication
+            key = (dur_type, warning_msg)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            results.append(
+                {
+                    "type": dur_type,
+                    "ingr_name": d.ingr_kor_name,
+                    "warning_msg": warning_msg,
+                    "severity": d.critical_value,
+                }
+            )
+        return results
 
     @classmethod
     async def get_fda_warnings_by_ingr(cls, ingr_name: str, client: httpx.AsyncClient = None):

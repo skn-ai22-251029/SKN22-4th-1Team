@@ -189,6 +189,7 @@ class SupabaseService:
         ]
         dur_data = await cls._get_dur_data_from_supabase(ingr_list)
 
+        seen = set()
         results = []
         for d in dur_data:
             dur_type = d.get("dur_type")
@@ -197,6 +198,12 @@ class SupabaseService:
             warning_msg = d.get("prohbt_content") or d.get("remark")
             if dur_type == "COMBINED" and mixture_ingr:
                 warning_msg = f"병용금기 성분: {mixture_ingr}"
+
+            # Deduplication key
+            key = (type_name, warning_msg)
+            if key in seen:
+                continue
+            seen.add(key)
 
             results.append(
                 {
