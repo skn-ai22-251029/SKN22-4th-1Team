@@ -79,3 +79,6 @@ target/
 *.swp
 *.swo
 *~
+
+# Docs
+z_structure.md
