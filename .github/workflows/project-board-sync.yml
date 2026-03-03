@@ -9,4 +9,8 @@ on:
 jobs:
   call-project-board-sync:
     uses: DJAeun/common-actions/.github/workflows/project-board-sync.yml@main
+    with:
+      # 아래 주소에 실제 연결할 대상 GitHub Project 보드의 URL을 입력해주세요.
+      # 예: https://github.com/orgs/skn-ai22-251029/projects/1
+      project-url: "https://github.com/orgs/skn-ai22-251029/projects/38"
     secrets: inherit
